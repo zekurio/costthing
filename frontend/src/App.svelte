@@ -231,7 +231,6 @@
         {:else}
           <CircleUserRound size={22} />
         {/if}
-        {#if admin}<span class="admin-dot" title="Admin"></span>{/if}
       </button>
 
       {#if menuOpen}
@@ -387,7 +386,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 32px;
+    padding: 10px 24px;
     background: var(--topbar-bg);
     color: var(--on-topbar);
     border-bottom: 1px solid var(--topbar-border);
@@ -400,20 +399,20 @@
   .brand {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
   }
 
   .tile {
-    width: 34px;
-    height: 34px;
+    width: 30px;
+    height: 30px;
     display: block;
-    border-radius: 9px;
+    border-radius: 8px;
     background: var(--topbar-tile);
   }
 
   .brand-name {
     font-weight: 700;
-    font-size: 17px;
+    font-size: 16px;
     letter-spacing: -0.01em;
   }
 
@@ -427,8 +426,8 @@
     position: relative;
     display: grid;
     place-items: center;
-    width: 38px;
-    height: 38px;
+    width: 34px;
+    height: 34px;
     border-radius: 99px;
     color: var(--on-topbar);
     transition: background 120ms ease;
@@ -440,8 +439,8 @@
   }
 
   .avatar-img {
-    width: 30px;
-    height: 30px;
+    width: 28px;
+    height: 28px;
     border-radius: 99px;
     object-fit: cover;
     display: block;
@@ -463,17 +462,6 @@
     display: inline-flex;
     align-items: center;
     color: var(--accent-strong);
-  }
-
-  .admin-dot {
-    position: absolute;
-    right: 6px;
-    bottom: 6px;
-    width: 8px;
-    height: 8px;
-    border-radius: 99px;
-    background: var(--ok);
-    border: 2px solid var(--topbar-bg);
   }
 
   .menu {
@@ -610,7 +598,7 @@
     }
 
     .topbar {
-      padding: 12px 16px;
+      padding: 8px 16px;
     }
 
     .duo {
