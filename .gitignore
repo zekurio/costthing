@@ -1,0 +1,7 @@
+node_modules/
+frontend/dist/
+frontend/.vite/
+data/
+.env
+result
+.direnv/

@@ -1,0 +1,625 @@
+<script lang="ts">
+  import Select from './Select.svelte'
+  import { categoryColor, categoryTextColor } from '../lib/format.ts'
+  import { COST_ICONS } from '../lib/icons.ts'
+  import type {
+    Cadence,
+    CostSaveInput,
+    Donation,
+    DonationCadence,
+    DonationInput,
+    IntervalUnit,
+    KnownUser,
+    SummaryPoint,
+  } from '../../../shared/types.ts'
+
+  interface Props {
+    /** null = new entry; otherwise the entry being edited (tab is locked to its kind) */
+    initial: SummaryPoint | Donation | null
+    /** which tab to show first when adding a new entry */
+    initialKind: 'cost' | 'donation'
+    /** non-admin submitting a donation for themselves: locks the form to the donation tab */
+    donorOnly?: boolean
+    /** prefill for the name field (e.g. the logged-in user's name) */
+    defaultName?: string
+    /** admin only: Jellyfin users (incl. archived) for linking donations */
+    knownUsers?: KnownUser[]
+    categories: string[]
+    /** category name → lucide icon name */
+    categoryIcons: Record<string, string>
+    onsaveCost: (input: CostSaveInput) => Promise<void>
+    onsaveDonation: (input: DonationInput) => Promise<void>
+    onclose: () => void
+  }
+
+  let {
+    initial,
+    initialKind,
+    donorOnly = false,
+    defaultName = '',
+    knownUsers = [],
+    categories,
+    categoryIcons,
+    onsaveCost,
+    onsaveDonation,
+    onclose,
+  }: Props = $props()
+
+  // The form is remounted for every open (it lives behind `{#if editing}`), so
+  // capturing the props' initial values here is intentional — the fields seed
+  // once and are then owned by the user.
+  // svelte-ignore state_referenced_locally
+  const initialCost = initial && 'costCents' in initial ? initial : null
+  // svelte-ignore state_referenced_locally
+  const initialDonation = initial && 'amountCents' in initial ? initial : null
+
+  const today = new Date().toISOString().slice(0, 10)
+
+  // svelte-ignore state_referenced_locally
+  let kind = $state<'cost' | 'donation'>(donorOnly ? 'donation' : initialKind)
+
+  // shared
+  // svelte-ignore state_referenced_locally
+  let name = $state(initial?.name ?? defaultName)
+  let amount = $state(
+    initialCost
+      ? (initialCost.costCents / 100).toFixed(2)
+      : initialDonation
+        ? (initialDonation.amountCents / 100).toFixed(2)
+        : '',
+  )
+
+  // cost-only
+  let category = $state(initialCost?.category ?? '')
+  // svelte-ignore state_referenced_locally
+  let icon = $state<string | null>(
+    initialCost ? categoryIcons[initialCost.category] ?? null : null,
+  )
+
+  // switching to an existing category pulls in its current icon; the picker
+  // can still override it afterwards (the icon is saved per category)
+  $effect(() => {
+    const trimmed = category.trim()
+    if (trimmed in categoryIcons) icon = categoryIcons[trimmed] ?? null
+    else icon = null
+  })
+  let cadence = $state<Cadence>(initialCost?.cadence ?? 'monthly')
+  let startsOn = $state(initialCost?.startsOn ?? today)
+  let endsOn = $state(initialCost?.endsOn ?? '')
+  let amortizationMonths = $state(initialCost?.amortizationMonths ?? 60)
+  let intervalCount = $state(initialCost?.intervalCount ?? 3)
+  let intervalUnit = $state<IntervalUnit>(initialCost?.intervalUnit ?? 'months')
+
+  // donation-only
+  let donationCadence = $state<DonationCadence>(initialDonation?.cadence ?? 'one_time')
+  let receivedOn = $state(initialDonation?.receivedOn ?? today)
+  let donationEndsOn = $state(initialDonation?.endsOn ?? '')
+  // linked Jellyfin user ('' = none/external); self-submitted donations are
+  // linked server-side, so the picker only shows for admins
+  // svelte-ignore state_referenced_locally
+  let donationUserId = $state(initialDonation?.userId ?? '')
+
+  const userOptions = $derived([
+    { value: '', label: 'kein Konto (extern)' },
+    ...knownUsers.map((u) => ({
+      value: u.id,
+      label: u.archived ? `${u.name} (archiviert)` : u.name,
+    })),
+  ])
+
+  // convenience: an empty name field takes over the linked user's name
+  $effect(() => {
+    const user = knownUsers.find((u) => u.id === donationUserId)
+    if (user && !name.trim()) name = user.name
+  })
+
+  // mirrors the server rule (one donor name → one identity): a donation whose
+  // name matches an account gets linked automatically, so preselect the match
+  // to make that visible before saving
+  $effect(() => {
+    if (donationUserId) return
+    const needle = name.trim().toLowerCase()
+    if (!needle) return
+    const matches = knownUsers.filter((u) => u.name.trim().toLowerCase() === needle)
+    const active = matches.filter((u) => !u.archived)
+    const match = active.length === 1
+      ? active[0]
+      : active.length === 0 && matches.length === 1
+        ? matches[0]
+        : null
+    if (match) donationUserId = match.id
+  })
+
+  let error = $state('')
+  let busy = $state(false)
+
+  function parseAmount(raw: string): number | null {
+    const value = Number(raw.replace(',', '.'))
+    if (!Number.isFinite(value) || value < 0) return null
+    return Math.round(value * 100)
+  }
+
+  async function submit(event: SubmitEvent) {
+    event.preventDefault()
+    const amountCents = parseAmount(amount)
+    if (amountCents === null || (kind === 'donation' && amountCents === 0)) {
+      error =
+        kind === 'donation'
+          ? 'Betrag muss eine positive Zahl sein, z. B. 5,00'
+          : 'Betrag muss eine Zahl sein, z. B. 10,40'
+      return
+    }
+    if (kind === 'cost') {
+      if (cadence === 'one_time' && (!amortizationMonths || amortizationMonths < 1)) {
+        error = 'Abschreibung muss mindestens 1 Monat sein.'
+        return
+      }
+    } else if (donationEndsOn && donationEndsOn < receivedOn) {
+      error = 'Ende liegt vor dem Beginn.'
+      return
+      if (endsOn && endsOn < startsOn) {
+        error = 'Ende liegt vor dem Beginn.'
+        return
+      }
+    }
+    busy = true
+    error = ''
+    try {
+      if (kind === 'cost') {
+        await onsaveCost({
+          name: name.trim(),
+          category: category.trim(),
+          icon,
+          costCents: amountCents,
+          cadence,
+          startsOn,
+          endsOn: endsOn || null,
+          amortizationMonths: cadence === 'one_time' ? amortizationMonths : null,
+          intervalCount: cadence === 'custom' ? intervalCount : null,
+          intervalUnit: cadence === 'custom' ? intervalUnit : null,
+        })
+      } else {
+        await onsaveDonation({
+          name: name.trim(),
+          amountCents,
+          cadence: donationCadence,
+          receivedOn,
+          endsOn: donationCadence === 'one_time' ? null : donationEndsOn || null,
+          userId: donationUserId || null,
+        })
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Speichern fehlgeschlagen.'
+      busy = false
+    }
+  }
+</script>
+
+<div class="overlay" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
+  <form class="modal" onsubmit={submit}>
+    <h2>
+      {donorOnly
+        ? 'Spende melden'
+        : initial
+          ? (kind === 'cost' ? 'Kostenpunkt bearbeiten' : 'Spende bearbeiten')
+          : 'Eintrag hinzufügen'}
+    </h2>
+
+    {#if donorOnly}
+      <span class="help">
+        Deine Spende erscheint als „ausstehend“ und zählt erst, sobald ein Admin sie bestätigt hat.
+      </span>
+    {:else}
+      <div
+        class="kind-toggle"
+        role="tablist"
+        aria-label="Eintragstyp"
+        title={initial ? 'Typ kann beim Bearbeiten nicht geändert werden' : ''}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={kind === 'cost'}
+          class:active={kind === 'cost'}
+          disabled={initial !== null}
+          onclick={() => (kind = 'cost')}
+        >
+          Kostenpunkt
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={kind === 'donation'}
+          class:active={kind === 'donation'}
+          disabled={initial !== null}
+          onclick={() => (kind = 'donation')}
+        >
+          Spende
+        </button>
+      </div>
+    {/if}
+
+    <label>
+      {#if kind === 'cost'}Name{:else}Name / Quelle{/if}
+      <input
+        bind:value={name}
+        required
+        maxlength="200"
+        placeholder={kind === 'cost' ? 'z. B. Mullvad VPN' : 'z. B. Alex oder Ko-fi'}
+      />
+    </label>
+
+    {#if kind === 'cost'}
+      <label>
+        Kategorie
+        <input bind:value={category} required maxlength="100" placeholder="Neue Kategorie eingeben…" />
+      </label>
+      {#if categories.length > 0}
+        <div class="cat-chips-wrap">
+          <span class="help">Bisherige Kategorien antippen — oder oben eine neue eingeben.</span>
+          <div class="cat-chips">
+            {#each categories as cat (cat)}
+              <button
+                type="button"
+                class="cat-chip"
+                class:active={category.trim() === cat}
+                onclick={() => (category = cat)}
+              >
+                <span class="chip-dot" style:background={categoryColor(cat)}></span>
+                {cat}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      <div class="icon-picker">
+        <span class="help">Kategorie-Icon (optional) — gilt für alle Posten dieser Kategorie; ohne Auswahl wird der Anfangsbuchstabe gezeigt.</span>
+        <div class="icon-grid">
+          <button
+            type="button"
+            class="icon-btn letter"
+            class:active={icon === null}
+            style:color={category.trim() ? categoryTextColor(category.trim()) : undefined}
+            onclick={() => (icon = null)}
+            title="kein Icon (Buchstabe)"
+          >
+            {category.trim().charAt(0).toUpperCase() || 'A'}
+          </button>
+          {#each Object.entries(COST_ICONS) as [iconName, Icon] (iconName)}
+            <button
+              type="button"
+              class="icon-btn"
+              class:active={icon === iconName}
+              onclick={() => (icon = iconName)}
+              title={iconName}
+            >
+              <Icon size={17} />
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="row">
+        <label>
+          Betrag (€)
+          <input bind:value={amount} required inputmode="decimal" placeholder="10,40" />
+        </label>
+        <label>
+          Rhythmus
+          <Select
+            bind:value={cadence}
+            options={[
+              { value: 'monthly', label: 'monatlich' },
+              { value: 'yearly', label: 'jährlich' },
+              { value: 'one_time', label: 'einmalig' },
+              { value: 'custom', label: 'eigenes Intervall' },
+            ]}
+          />
+        </label>
+      </div>
+
+      <div class="row">
+        <label>
+          Beginn
+          <input type="date" bind:value={startsOn} required />
+        </label>
+        <label>
+          Ende (optional)
+          <input type="date" bind:value={endsOn} />
+        </label>
+      </div>
+      {#if endsOn}
+        <span class="help">Gekündigt: zählt noch bis einschließlich dieses Monats, der Verlauf bleibt erhalten.</span>
+      {/if}
+
+      {#if cadence === 'one_time'}
+        <label>
+          Abschreibung über (Monate)
+          <input type="number" min="1" max="1200" bind:value={amortizationMonths} required />
+          <span class="help">Verteilt die Kosten gleichmäßig über so viele Monate.</span>
+        </label>
+      {/if}
+
+      {#if cadence === 'custom'}
+        <div class="row">
+          <label>
+            Alle
+            <input type="number" min="1" bind:value={intervalCount} required />
+          </label>
+          <label>
+            Einheit
+            <Select
+              bind:value={intervalUnit}
+              options={[
+                { value: 'days', label: 'Tage' },
+                { value: 'weeks', label: 'Wochen' },
+                { value: 'months', label: 'Monate' },
+                { value: 'years', label: 'Jahre' },
+              ]}
+            />
+          </label>
+        </div>
+      {/if}
+    {:else}
+      {#if !donorOnly && knownUsers.length > 0}
+        <label>
+          Jellyfin-Konto (optional)
+          <Select bind:value={donationUserId} options={userOptions} />
+          <span class="help">
+            Stimmt der Name genau mit einem Konto oder einer bereits verknüpften Spende überein,
+            wird automatisch verknüpft. Gelöschte Konten bleiben als „archiviert“ wählbar, damit
+            alte Spenden zugeordnet bleiben.
+          </span>
+        </label>
+      {/if}
+      <div class="row">
+        <label>
+          Betrag (€)
+          <input bind:value={amount} required inputmode="decimal" placeholder="5,00" />
+        </label>
+        <label>
+          Rhythmus
+          <Select
+            bind:value={donationCadence}
+            options={[
+              { value: 'one_time', label: 'einmalig' },
+              { value: 'monthly', label: 'monatlich' },
+              { value: 'yearly', label: 'jährlich' },
+            ]}
+          />
+        </label>
+      </div>
+      <div class="row">
+        <label>
+          {donationCadence === 'one_time' ? 'Eingegangen am' : 'Erstmals am'}
+          <input type="date" bind:value={receivedOn} required />
+        </label>
+        {#if donationCadence !== 'one_time'}
+          <label>
+            Ende (optional)
+            <input type="date" bind:value={donationEndsOn} />
+          </label>
+        {/if}
+      </div>
+      <span class="help">
+        {donationCadence === 'one_time'
+          ? 'Zählt für den Kalendermonat des Datums.'
+          : 'Wird ab dem ersten Datum automatisch in jedem passenden Monat eingeplant.'}
+      </span>
+    {/if}
+
+    {#if error}<p class="error">{error}</p>{/if}
+
+    <div class="actions">
+      <button type="button" class="ghost" onclick={onclose}>abbrechen</button>
+      <button type="submit" class="primary" disabled={busy}>
+        {busy ? 'speichere…' : donorOnly ? 'zur Bestätigung senden' : 'speichern'}
+      </button>
+    </div>
+  </form>
+</div>
+
+<style>
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgb(40 50 60 / 0.4);
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    z-index: 10;
+  }
+
+  .modal {
+    width: min(440px, 100%);
+    max-height: 90vh;
+    overflow-y: auto;
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-2);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .kind-toggle {
+    display: flex;
+    background: var(--surface-2);
+    border-radius: 99px;
+    padding: 3px;
+    gap: 2px;
+  }
+
+  .kind-toggle button {
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 14px;
+    color: var(--muted);
+    border-radius: 99px;
+    transition: background 120ms ease, color 120ms ease;
+  }
+
+  .kind-toggle button.active {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-weight: 600;
+  }
+
+  .kind-toggle button:disabled {
+    cursor: not-allowed;
+  }
+
+  .kind-toggle button:disabled:not(.active) {
+    opacity: 0.45;
+  }
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .help {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .cat-chips-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .cat-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .cat-chip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    padding: 6px 12px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .cat-chip:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+
+  .cat-chip.active {
+    border-color: var(--accent);
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    font-weight: 600;
+  }
+
+  .chip-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 99px;
+  }
+
+  .icon-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .icon-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .icon-btn {
+    width: 100%;
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--muted);
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+
+  .icon-btn:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+
+  .icon-btn.letter {
+    font-weight: 700;
+    font-size: 15px;
+  }
+
+  .icon-btn.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+  }
+
+  .error {
+    margin: 0;
+    color: var(--danger-strong);
+    font-size: 13px;
+  }
+
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 4px;
+  }
+
+  .primary {
+    background: var(--accent);
+    color: var(--on-accent);
+    font-weight: 600;
+    border-radius: 99px;
+    padding: 9px 20px;
+    transition: background 120ms ease;
+  }
+
+  .primary:hover:not(:disabled) {
+    background: var(--accent-strong);
+  }
+
+  .primary:disabled {
+    opacity: 0.5;
+  }
+
+  .ghost {
+    color: var(--muted);
+    border-radius: 99px;
+    padding: 9px 16px;
+  }
+
+  .ghost:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+</style>
