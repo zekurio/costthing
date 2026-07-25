@@ -55,6 +55,8 @@
 
   let menuOpen = $state(false)
   let menuEl = $state<HTMLElement>()
+  /** measured topbar height — keeps the sticky stats column from shifting on scroll */
+  let topbarHeight = $state(55)
   let importInput = $state<HTMLInputElement>()
 
   const admin = $derived(me?.isAdmin ?? false)
@@ -213,7 +215,7 @@
   <Gate onunlock={load} />
   {#if loadError}<div class="center muted">{loadError}</div>{/if}
 {:else if summary}
-  <nav class="topbar">
+  <nav class="topbar" bind:offsetHeight={topbarHeight}>
     <div class="brand">
       <img class="tile" src="/icon.svg" alt="" aria-hidden="true" />
       <span class="brand-name">costthing</span>
@@ -302,40 +304,44 @@
   </nav>
 
   <main>
-    <section class="duo">
-      <div class="duo-col">
-        <div class="section-head">
-          <h2 class="section-title">Kosten nach Kategorie</h2>
-          <p class="section-note">
-            aktueller Monat · {cents(fmt, summary.totals.yearlyCents)}/Jahr
-          </p>
-        </div>
-        <CategoryPie
-          slices={categories.map((c) => ({ name: c.name, monthlyCents: c.monthlyCents }))}
+    <div class="layout">
+      <div class="entries-col">
+        <EntryTable
+          points={summary.points}
+          donations={summary.donations}
+          categoryIcons={summary.categoryIcons}
+          coverage={summary.coverage}
           {fmt}
+          {admin}
+          {knownUsers}
+          meName={me?.name ?? ''}
+          onchanged={load}
+          onadminerror={handleAdminError}
         />
       </div>
-      <div class="duo-col">
-        <div class="section-head">
-          <h2 class="section-title">Kosten &amp; Spenden</h2>
-          <p class="section-note">gesamt + 12 Monate Prognose</p>
-        </div>
-        <TimelineChart timeline={summary.timeline} coverage={summary.coverage} {fmt} />
-      </div>
-    </section>
 
-    <EntryTable
-      points={summary.points}
-      donations={summary.donations}
-      categoryIcons={summary.categoryIcons}
-      coverage={summary.coverage}
-      {fmt}
-      {admin}
-      {knownUsers}
-      meName={me?.name ?? ''}
-      onchanged={load}
-      onadminerror={handleAdminError}
-    />
+      <aside class="stats-col" style:--topbar-h="{topbarHeight}px">
+        <section class="stat-block">
+          <div class="section-head">
+            <h2 class="section-title">Kosten nach Kategorie</h2>
+            <p class="section-note">
+              aktueller Monat · {cents(fmt, summary.totals.yearlyCents)}/Jahr
+            </p>
+          </div>
+          <CategoryPie
+            slices={categories.map((c) => ({ name: c.name, monthlyCents: c.monthlyCents }))}
+            {fmt}
+          />
+        </section>
+        <section class="stat-block">
+          <div class="section-head">
+            <h2 class="section-title">Kosten &amp; Spenden</h2>
+            <p class="section-note">gesamt + 12 Monate Prognose</p>
+          </div>
+          <TimelineChart timeline={summary.timeline} coverage={summary.coverage} {fmt} />
+        </section>
+      </aside>
+    </div>
   </main>
 
   {#if confirmDialog}
@@ -547,24 +553,50 @@
   /* ---- layout ---- */
 
   main {
-    width: min(1160px, 100%);
+    width: min(1560px, 100%);
     margin: 0 auto;
-    padding: 0 32px 64px;
+    padding: 0 32px 40px;
   }
 
-  /* ---- duo: pie + timeline ---- */
+  /* ---- layout: entries list + stats column ---- */
 
-  .duo {
+  .layout {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
-    gap: 56px;
-    padding: 48px 0;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: 40px;
+    align-items: start;
+    padding: 20px 0;
   }
 
-  @media (max-width: 860px) {
-    .duo {
+  .entries-col {
+    min-width: 0;
+  }
+
+  .stats-col {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    position: sticky;
+    /* topbar + .layout top padding = natural resting position, so pinning is seamless */
+    top: calc(var(--topbar-h, 55px) + 20px);
+  }
+
+  @media (max-width: 1100px) {
+    .layout {
       grid-template-columns: 1fr;
-      gap: 40px;
+      gap: 28px;
+    }
+
+    /* stats above the list when stacked, matching the old order */
+    .stats-col {
+      order: -1;
+      position: static;
+    }
+
+    .entries-col {
+      border-top: 1px solid var(--line);
+      padding-top: 24px;
     }
   }
 
@@ -588,26 +620,30 @@
     letter-spacing: -0.01em;
   }
 
-  .duo .section-head {
-    margin-bottom: 24px;
+  .stat-block .section-head {
+    margin-bottom: 14px;
   }
 
   @media (max-width: 640px) {
     main {
-      padding: 0 16px 48px;
+      padding: 0 16px 40px;
     }
 
     .topbar {
       padding: 8px 16px;
     }
 
-    .duo {
-      padding: 28px 0;
-      gap: 32px;
+    .layout {
+      padding: 16px 0;
+      gap: 24px;
     }
 
-    .duo .section-head {
-      margin-bottom: 16px;
+    .stats-col {
+      gap: 24px;
+    }
+
+    .stat-block .section-head {
+      margin-bottom: 10px;
     }
 
     .section-head {

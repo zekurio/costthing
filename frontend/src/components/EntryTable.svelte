@@ -555,10 +555,6 @@
 {/if}
 
 <style>
-  .entries {
-    border-top: 1px solid var(--line);
-    padding-top: 40px;
-  }
 
   .section-head {
     display: flex;
@@ -623,8 +619,8 @@
   .filters {
     display: grid;
     grid-template-columns: 2fr auto 1fr 1fr 1fr;
-    gap: 12px;
-    margin: 26px 0 10px;
+    gap: 10px;
+    margin: 14px 0 6px;
     align-items: center;
   }
 
@@ -665,7 +661,7 @@
     .filters {
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      margin: 20px 0 6px;
+      margin: 14px 0 6px;
     }
 
     .search,
@@ -697,7 +693,7 @@
   }
 
   .table-head {
-    padding: 14px 0;
+    padding: 10px 0;
     border-bottom: 1px solid var(--line);
     font-size: 12px;
     font-weight: 600;
@@ -713,7 +709,7 @@
   }
 
   .row {
-    padding: 16px 0;
+    padding: 11px 0;
   }
 
   .row + .row {
@@ -844,7 +840,7 @@
   }
 
   .empty {
-    padding: 28px 0;
+    padding: 20px 0;
   }
 
   @media (max-width: 860px) {
