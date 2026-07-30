@@ -1,65 +1,49 @@
 # costthing
 
-A small dashboard that shows what running the shared Jellyfin server costs — broken down by
-category, with effective monthly and yearly totals. Built for transparency towards the friends using
-the server.
+A small dashboard that shows what running a shared Jellyfin server costs — per category, per month
+and per year — and how far donations cover it. Built for transparency towards the friends using the
+server.
 
-- **Dashboard behind Jellyfin login**: users sign in with their Jellyfin credentials
-  (`AuthenticateByName`); anyone with an account on the server can see totals per month/year,
-  per-category bars, and a full list of cost items including amortized one-time purchases.
-- **Admin-only editing**: adding, editing, cancelling ("kündigen") and deleting cost items is
-  reserved for Jellyfin administrators — admin status comes straight from Jellyfin, nothing else
-  can change data.
-- **Storage** is a single JSON file — the exact same format as the import/export, so exports can be
-  dropped back in as the data file.
+Login is Jellyfin's own: anyone with an account sees the totals, the timeline and the full item
+list, while adding, editing, cancelling and deleting is reserved for Jellyfin administrators.
+Nothing but Jellyfin decides who may write. The UI is in German.
 
-The stack mirrors arr-cal-proxy: Deno + Elysia backend, Svelte 5 + Vite frontend, Jellyfin duotone
-(purple `#aa5cc3` → blue `#00a4dc`), Barlow Condensed + Instrument Sans.
+### Cost model
 
-## Cost model
+Every cost point has a cadence:
 
-Each cost point has a cadence:
+- `monthly` / `yearly` — face value; yearly is divided by 12 for monthly figures.
+- `custom` — every `<intervalCount>` `<intervalUnit>` (days/weeks/months/years), prorated per month.
+- `one_time` — counts only in its start month, or, with `amortizationMonths`, is spread evenly over
+  that many months from `startsOn`.
 
-- `monthly` / `yearly` — counted at face value (yearly is divided by 12 for monthly figures).
-- `one_time` — with `amortizationMonths` set, the cost is spread evenly over that many months
-  starting at `startsOn`; afterwards it drops off the monthly total. Without amortization it only
-  counts in the month it started.
-- `custom` — every `<intervalCount>` `<intervalUnit>` (days/weeks/months/years), prorated monthly.
+`endsOn` ("kündigen" in the UI) keeps a point counting through that month and drops it afterwards,
+so historic months stay intact in the timeline. Deleting a point instead removes it retroactively.
 
-Any point can have an `endsOn` date ("kündigen" in the UI): it keeps counting through that month,
-then drops to zero — historical months keep it, so the timeline chart shows the full history.
-Deleting a point instead removes it retroactively from the whole timeline. On every write the
-previous state of the data file is kept as `costs.json.bak`.
+### Donations
 
-## Donations
+Donations are one-off, monthly or yearly. Any logged-in user can report one for themselves; it stays
+_pending_ and uncounted until an admin confirms it. Admins can add, edit and delete donations
+directly.
 
-Donations can be one-off, monthly, or yearly entries (name/source, amount, first date, and an
-optional end date). One-off donations count toward the month of their receipt; recurring donations
-are automatically included in every matching month and in the 12-month forecast. The dashboard shows
-how much of the current month's cost they cover, whether there's a surplus or shortfall, and a
-cumulative balance across all months since the first recorded donation (earlier cost-only history is
-ignored, so it doesn't drown the balance in deficit). The timeline chart draws donations as a
-second, green curve next to the cost line. Adding/editing/deleting donations is admin-only; they
-live in the same JSON file as the costs, so exports include them.
+The dashboard shows how much of the current month's cost is covered, the surplus or shortfall, and a
+cumulative balance starting at the first donation month — earlier cost-only history is ignored so it
+does not drown the balance in deficit. The timeline chart draws donations as a second curve.
 
-Donations can be linked to Jellyfin accounts — one donor name maps to one identity. Self-reported
-donations are linked to the submitter automatically; admins can pick any account from a user picker
-when adding or editing a donation. On every write (and on each admin user sync) unlinked donations
-are reconciled: they inherit the link from already-linked donations with the same name (so manually
-linking one donation covers the donor's whole history), otherwise they are matched to an account by
-exact name (case-insensitive). Names claimed by several different users are never guessed and stay
-unlinked.
-The app keeps a `knownUsers` registry in the data file: every user ever seen is recorded, and when
-an account disappears from the Jellyfin server it is kept as *archived* (never deleted), so old
-donations stay attributable and a returning donor maps back to the same id. The registry is synced
-from Jellyfin whenever an admin loads the user list (`GET /api/users`, using the admin's own
-session token).
+Donations link to Jellyfin accounts, one donor name to one identity. Self-reports link to the
+submitter; on every write unlinked donations inherit the link of same-named linked donations, and
+otherwise match an account by exact name (case-insensitive). Names claimed by several users stay
+unlinked. Every user ever seen is kept in a `knownUsers` registry and archived rather than deleted
+when the account disappears from Jellyfin, so old donations remain attributable. The registry syncs
+whenever an admin loads the user list.
 
-Admins can also import a previous costthing JSON export. Imports are validated before replacing the
-current data, require an explicit confirmation in the UI, and retain the previous data file as
-`costs.json.bak`.
+### Storage
 
-## Configuration (env vars)
+A single JSON file, in exactly the import/export format — an export can be dropped back in as the
+data file. Each write keeps the previous state as `costs.json.bak`. Imports are validated before
+they replace anything and need an explicit confirmation in the UI.
+
+### Configuration
 
 | Variable       | Default             | Purpose                                       |
 | -------------- | ------------------- | --------------------------------------------- |
@@ -68,46 +52,58 @@ current data, require an explicit confirmation in the UI, and retain the previou
 | `DATA_FILE`    | `./data/costs.json` | where costs are stored                        |
 | `STATIC_DIR`   | `./frontend/dist`   | built frontend assets                         |
 
-## Development
+### Deployment
 
-Needs a Nix shell (`nix develop` provides Deno) or a local Deno install.
+Railway builds the repo's `Dockerfile` directly via `railway.toml`: create a service from this repo,
+add a **volume mounted at `/data`**, and set `JELLYFIN_URL`. The healthcheck is `/api/health` and an
+empty data file is created on first boot.
+
+Plain Docker works the same way:
+
+```sh
+docker build -t costthing .
+docker run -p 8080:8080 -v costthing-data:/data -e JELLYFIN_URL=http://jellyfin:8096 costthing
+```
+
+With Nix, `nix run github:zekurio/costthing` or `nix build` produce the same app; it stores data in
+`./data/costs.json` unless `DATA_FILE` says otherwise.
+
+### Development
+
+`nix develop` provides Deno, or install Deno 2 yourself.
 
 ```sh
 cp .env.example .env   # point JELLYFIN_URL at your Jellyfin server
-deno task dev          # backend on :8080 + vite dev server with /api proxy
+deno task dev          # API on :8080 + Vite dev server proxying /api
 ```
 
-Other tasks: `deno task check` (typecheck both ends), `deno task frontend:build`, `deno task start`
-(serve built frontend + API from one process).
+`deno task check` typechecks both ends, `deno test --allow-read --allow-write` runs the cost and
+store tests, and `deno fmt` / `deno lint` cover `src/` and `shared/`. `deno task frontend:build`
+writes `frontend/dist`, which `deno task start` then serves together with the API from one process.
+[AGENTS.md](AGENTS.md) documents the conventions this repo expects.
 
-## Nix package
+### API
 
-Build with `nix build` or run with `nix run`. The package stores its writable data in
-`./data/costs.json` by default; override `DATA_FILE` and set `JELLYFIN_URL` as needed.
+| Endpoint                          | Auth             | Purpose                                                |
+| --------------------------------- | ---------------- | ------------------------------------------------------ |
+| `GET /api/health`                 | —                | healthcheck                                            |
+| `POST /api/auth`                  | —                | Jellyfin username/password → session cookie            |
+| `POST /api/logout`                | —                | invalidate the Jellyfin session + clear the cookie     |
+| `GET /api/me`                     | session cookie   | current user: name, admin status, avatar availability  |
+| `GET /api/me/avatar`              | session cookie   | proxied Jellyfin profile image                         |
+| `GET /api/summary`                | session cookie   | cost points, donations, coverage, timeline, totals     |
+| `POST /api/donations/submit`      | session cookie   | self-report a donation (pending until confirmed)       |
+| `GET /api/users`                  | + Jellyfin admin | Jellyfin users incl. archived ones; syncs the registry |
+| `GET /api/export`                 | + Jellyfin admin | download the raw JSON                                  |
+| `POST /api/import`                | + Jellyfin admin | validate and replace data from JSON                    |
+| `POST /api/costs`                 | + Jellyfin admin | add a cost point                                       |
+| `PUT /api/costs/:id`              | + Jellyfin admin | replace a cost point                                   |
+| `DELETE /api/costs/:id`           | + Jellyfin admin | delete a cost point                                    |
+| `POST /api/donations`             | + Jellyfin admin | add a confirmed donation                               |
+| `POST /api/donations/:id/confirm` | + Jellyfin admin | confirm a pending donation                             |
+| `PUT /api/donations/:id`          | + Jellyfin admin | replace a donation                                     |
+| `DELETE /api/donations/:id`       | + Jellyfin admin | delete a donation                                      |
 
-## Deployment (Railway)
+### License
 
-The repo ships a `Dockerfile` + `railway.toml`; Railway builds it directly.
-
-1. Create a service from this repo.
-2. Add a **volume mounted at `/data`** — that's where `costs.json` lives.
-3. Set the `JELLYFIN_URL` env var.
-4. Done — healthcheck is `/api/health`; an empty data file is created on first boot.
-
-## API
-
-| Endpoint                    | Auth             | Purpose                                                 |
-| --------------------------- | ---------------- | ------------------------------------------------------- |
-| `POST /api/auth`            | —                | Jellyfin username/password → session cookie             |
-| `POST /api/logout`          | —                | invalidate the Jellyfin session + clear the cookie      |
-| `GET /api/me`               | session cookie   | current user: name, admin status, avatar availability   |
-| `GET /api/me/avatar`        | session cookie   | proxied Jellyfin profile image                          |
-| `GET /api/summary`          | session cookie   | all cost points + computed totals                       |
-| `GET /api/export`           | + Jellyfin admin | download the raw JSON                                   |
-| `POST /api/import`          | + Jellyfin admin | validate and replace data from JSON                     |
-| `POST /api/costs`           | + Jellyfin admin | add a cost point                                        |
-| `PUT /api/costs/:id`        | + Jellyfin admin | replace a cost point                                    |
-| `DELETE /api/costs/:id`     | + Jellyfin admin | delete a cost point                                     |
-| `POST /api/donations`       | + Jellyfin admin | add a donation                                          |
-| `PUT /api/donations/:id`    | + Jellyfin admin | replace a donation                                      |
-| `DELETE /api/donations/:id` | + Jellyfin admin | delete a donation                                       |
+[MIT](LICENSE)
