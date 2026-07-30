@@ -122,6 +122,7 @@ stdenvNoCC.mkDerivation {
   meta = {
     description = "Shared Jellyfin server cost dashboard";
     homepage = "https://github.com/zekurio/costthing";
+    license = lib.licenses.mit;
     mainProgram = "costthing";
   };
 }
