@@ -1,24 +1,24 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import {
-    CircleUserRound,
-    Download,
-    LogOut,
-    Monitor,
-    Moon,
-    ShieldCheck,
-    Sun,
-    Upload,
-  } from 'lucide-svelte'
-  import Gate from './components/Gate.svelte'
+  import CircleUserRound from 'lucide-svelte/icons/circle-user-round'
+  import Download from 'lucide-svelte/icons/download'
+  import LogOut from 'lucide-svelte/icons/log-out'
+  import Monitor from 'lucide-svelte/icons/monitor'
+  import Moon from 'lucide-svelte/icons/moon'
+  import ShieldCheck from 'lucide-svelte/icons/shield-check'
+  import Sun from 'lucide-svelte/icons/sun'
+  import Upload from 'lucide-svelte/icons/upload'
   import CategoryPie from './components/CategoryPie.svelte'
-  import TimelineChart from './components/TimelineChart.svelte'
+  import ConfirmDialog from './components/ConfirmDialog.svelte'
   import EntryTable from './components/EntryTable.svelte'
+  import Gate from './components/Gate.svelte'
+  import TimelineChart from './components/TimelineChart.svelte'
   import { api, ApiError } from './lib/api.ts'
+  import type { ConfirmDialogState } from './lib/dialog.ts'
   import { cents, moneyFormatter } from './lib/format.ts'
   import type { KnownUser, Me, Summary, SummaryPoint } from '../../shared/types.ts'
 
-  let view = $state<'loading' | 'gate' | 'ready'>('loading')
+  let view = $state<'loading' | 'gate' | 'ready' | 'error'>('loading')
   let summary = $state<Summary | null>(null)
   let me = $state<Me | null>(null)
   /** admin only: Jellyfin users (incl. archived) for linking donations */
@@ -28,7 +28,16 @@
   // ---- theme ----
 
   type ThemePref = 'light' | 'dark' | 'system'
-  const storedTheme = localStorage.getItem('costthing.theme')
+
+  function savedTheme(): string | null {
+    try {
+      return localStorage.getItem('costthing.theme')
+    } catch {
+      return null
+    }
+  }
+
+  const storedTheme = savedTheme()
   let themePref = $state<ThemePref>(
     storedTheme === 'dark' || storedTheme === 'light' ? storedTheme : 'system',
   )
@@ -47,8 +56,12 @@
 
   $effect(() => {
     document.documentElement.dataset.theme = resolvedTheme
-    if (themePref === 'system') localStorage.removeItem('costthing.theme')
-    else localStorage.setItem('costthing.theme', themePref)
+    try {
+      if (themePref === 'system') localStorage.removeItem('costthing.theme')
+      else localStorage.setItem('costthing.theme', themePref)
+    } catch {
+      // Theme persistence is optional when browser storage is unavailable.
+    }
   })
 
   // ---- user menu ----
@@ -83,24 +96,47 @@
     return [...map.values()].sort((a, b) => b.monthlyCents - a.monthlyCents)
   })
 
+  let loadVersion = 0
+
   async function load() {
+    const version = ++loadVersion
+    const keepReady = view === 'ready' && summary !== null && me !== null
+    if (!keepReady) view = 'loading'
+    loadError = ''
+
     try {
-      ;[summary, me] = await Promise.all([api.summary(), api.me()])
-      if (me.isAdmin) {
-        // best effort — linking still works from the archive if Jellyfin is down
+      const [nextSummary, nextMe] = await Promise.all([api.summary(), api.me()])
+      if (version !== loadVersion) return
+      summary = nextSummary
+      me = nextMe
+      if (nextMe.isAdmin) {
+        // Best effort: keep an already loaded archive during a transient failure.
         try {
-          knownUsers = await api.users()
-        } catch {
-          knownUsers = []
+          const users = await api.users()
+          if (version !== loadVersion) return
+          knownUsers = users
+        } catch (err) {
+          if (err instanceof ApiError && (err.status === 401 || err.status === 403)) throw err
         }
+      } else {
+        knownUsers = []
       }
       view = 'ready'
     } catch (err) {
+      if (version !== loadVersion) return
       if (err instanceof ApiError && err.status === 401) {
+        summary = null
+        me = null
+        knownUsers = []
+        menuOpen = false
         view = 'gate'
       } else {
-        loadError = err instanceof Error ? err.message : 'Laden fehlgeschlagen'
-        view = 'gate'
+        loadError = err instanceof ApiError && err.status === 503
+          ? 'Jellyfin ist gerade nicht erreichbar. Deine Sitzung bleibt erhalten.'
+          : err instanceof Error
+            ? err.message
+            : 'Laden fehlgeschlagen'
+        if (!keepReady) view = 'error'
       }
     }
   }
@@ -108,27 +144,28 @@
   onMount(load)
 
   function handleAdminError(err: unknown) {
-    // session expired or admin rights revoked — re-sync with the server
+    // Session expired or admin rights revoked — re-sync with the server.
     if (err instanceof ApiError && (err.status === 401 || err.status === 403)) void load()
   }
 
   async function logout() {
-    await api.logout()
-    me = null
-    view = 'gate'
+    loadError = ''
+    try {
+      await api.logout()
+      loadVersion++
+      summary = null
+      me = null
+      knownUsers = []
+      menuOpen = false
+      view = 'gate'
+    } catch (err) {
+      loadError = err instanceof Error ? err.message : 'Abmelden fehlgeschlagen'
+    }
   }
 
   // ---- admin import/export ----
 
-  interface ConfirmAction {
-    label: string
-    kind: 'primary' | 'danger' | 'ghost'
-    run: () => void
-  }
-
-  let confirmDialog = $state<{ title: string; body: string; actions: ConfirmAction[] } | null>(
-    null,
-  )
+  let confirmDialog = $state<ConfirmDialogState | null>(null)
 
   async function downloadExport() {
     try {
@@ -141,7 +178,10 @@
       a.click()
       URL.revokeObjectURL(url)
     } catch (err) {
-      if (err instanceof ApiError) handleAdminError(err)
+      handleAdminError(err)
+      if (!(err instanceof ApiError && (err.status === 401 || err.status === 403))) {
+        loadError = err instanceof Error ? err.message : 'Export fehlgeschlagen.'
+      }
     }
   }
 
@@ -200,9 +240,7 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (e.key !== 'Escape') return
-    if (confirmDialog) confirmDialog = null
-    else if (menuOpen) menuOpen = false
+    if (e.key === 'Escape' && menuOpen) menuOpen = false
   }}
   onpointerdown={(e) => {
     if (menuOpen && menuEl && !menuEl.contains(e.target as Node)) menuOpen = false
@@ -210,21 +248,26 @@
 />
 
 {#if view === 'loading'}
-  <div class="center muted">lädt…</div>
+  <div class="center muted" role="status">lädt…</div>
 {:else if view === 'gate'}
   <Gate onunlock={load} />
-  {#if loadError}<div class="center muted">{loadError}</div>{/if}
+{:else if view === 'error'}
+  <div class="center load-error" role="alert">
+    <p>{loadError}</p>
+    <button class="btn primary" onclick={load}>erneut versuchen</button>
+  </div>
 {:else if summary}
   <nav class="topbar" bind:offsetHeight={topbarHeight}>
     <div class="brand">
       <img class="tile" src="/icon.svg" alt="" aria-hidden="true" />
-      <span class="brand-name">costthing</span>
+      <h1 class="brand-name">costthing</h1>
     </div>
     <div class="user-menu" bind:this={menuEl}>
       <button
         class="avatar-btn"
-        aria-haspopup="menu"
         aria-expanded={menuOpen}
+        aria-controls="user-menu-panel"
+        aria-label="Benutzermenü öffnen"
         title="Menü"
         onclick={() => (menuOpen = !menuOpen)}
       >
@@ -236,7 +279,7 @@
       </button>
 
       {#if menuOpen}
-        <div class="menu" role="menu">
+        <div class="menu" id="user-menu-panel" aria-label="Benutzermenü">
           {#if me}
             <div class="menu-user">
               <span class="menu-user-name">{me.name}</span>
@@ -255,6 +298,7 @@
               onclick={() => (themePref = 'light')}
               title="Hell"
               aria-label="Helles Design"
+              aria-pressed={themePref === 'light'}
             >
               <Sun size={16} />
             </button>
@@ -263,6 +307,7 @@
               onclick={() => (themePref = 'system')}
               title="Systemeinstellung folgen"
               aria-label="Design der Systemeinstellung folgen"
+              aria-pressed={themePref === 'system'}
             >
               <Monitor size={16} />
             </button>
@@ -271,6 +316,7 @@
               onclick={() => (themePref = 'dark')}
               title="Dunkel"
               aria-label="Dunkles Design"
+              aria-pressed={themePref === 'dark'}
             >
               <Moon size={16} />
             </button>
@@ -286,16 +332,16 @@
               bind:this={importInput}
               onchange={chooseImport}
             />
-            <button role="menuitem" onclick={() => importInput?.click()}>
+            <button onclick={() => importInput?.click()}>
               <Upload size={16} /> JSON importieren
             </button>
-            <button role="menuitem" onclick={downloadExport}>
+            <button onclick={downloadExport}>
               <Download size={16} /> JSON exportieren
             </button>
             <div class="menu-sep"></div>
           {/if}
 
-          <button role="menuitem" onclick={logout}>
+          <button onclick={logout}>
             <LogOut size={16} /> Abmelden
           </button>
         </div>
@@ -304,6 +350,12 @@
   </nav>
 
   <main>
+    {#if loadError}
+      <div class="load-banner" role="alert">
+        <span>{loadError}</span>
+        <button onclick={load}>erneut versuchen</button>
+      </div>
+    {/if}
     <div class="layout">
       <div class="entries-col">
         <EntryTable
@@ -345,33 +397,12 @@
   </main>
 
   {#if confirmDialog}
-    <div
-      class="overlay"
-      role="presentation"
-      onclick={(e) => e.target === e.currentTarget && (confirmDialog = null)}
-    >
-      <div class="admin-box">
-        <h2>{confirmDialog.title}</h2>
-        <p class="confirm-body">{confirmDialog.body}</p>
-        <div class="actions">
-          {#each confirmDialog.actions as action (action.label)}
-            <button
-              class={action.kind === 'danger'
-                ? 'danger-solid'
-                : action.kind === 'ghost'
-                  ? 'muted-btn'
-                  : 'primary'}
-              onclick={() => {
-                confirmDialog = null
-                action.run()
-              }}
-            >
-              {action.label}
-            </button>
-          {/each}
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog
+      title={confirmDialog.title}
+      body={confirmDialog.body}
+      actions={confirmDialog.actions}
+      onclose={() => (confirmDialog = null)}
+    />
   {/if}
 {/if}
 
@@ -417,6 +448,7 @@
   }
 
   .brand-name {
+    margin: 0;
     font-weight: 700;
     font-size: 16px;
     letter-spacing: -0.01em;
@@ -657,86 +689,34 @@
     }
   }
 
-  /* ---- admin modal ---- */
-
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgb(40 50 60 / 0.4);
-    display: grid;
-    place-items: center;
-    padding: 20px;
-    z-index: 10;
-  }
-
-  .admin-box {
-    width: min(340px, 100%);
-    background: var(--surface);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
+  .load-error {
+    align-content: center;
+    gap: 12px;
     padding: 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
+    text-align: center;
   }
 
-  .admin-box h2 {
+  .load-error p {
     margin: 0;
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
+    color: var(--danger-strong);
   }
 
-  .actions {
+  .load-banner {
     display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
-
-  .primary {
-    background: var(--accent);
-    color: var(--on-accent);
-    font-weight: 600;
-    border-radius: 99px;
-    padding: 8px 18px;
-    transition: background 120ms ease;
-  }
-
-  .primary:hover:not(:disabled) {
-    background: var(--accent-strong);
-  }
-
-  .primary:disabled {
-    opacity: 0.5;
-  }
-
-  .muted-btn {
-    color: var(--muted);
-    border-radius: 99px;
-    padding: 8px 14px;
-  }
-
-  .muted-btn:hover {
-    background: var(--surface-2);
-    color: var(--ink);
-  }
-
-  .danger-solid {
-    background: var(--danger);
-    color: var(--on-accent);
-    font-weight: 600;
-    border-radius: 99px;
-    padding: 8px 18px;
-    transition: background 120ms ease;
-  }
-
-  .danger-solid:hover {
-    background: var(--danger-strong);
-  }
-
-  .confirm-body {
-    margin: 0;
-    color: var(--muted);
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 16px;
+    padding: 10px 14px;
+    color: var(--danger-strong);
+    background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+    border-radius: 10px;
     font-size: 14px;
+  }
+
+  .load-banner button {
+    flex-shrink: 0;
+    color: inherit;
+    font-weight: 600;
   }
 </style>

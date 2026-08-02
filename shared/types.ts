@@ -13,7 +13,7 @@ export interface CostPoint {
   startsOn: string
   /** ISO date — cancelled services keep their history but stop counting after this month */
   endsOn: string | null
-  /** one_time only: spread the cost over this many months from startsOn */
+  /** one_time only: spread over this many calendar months, starting with startsOn's month */
   amortizationMonths: number | null
   /** custom cadence: every <intervalCount> <intervalUnit> */
   intervalCount: number | null

@@ -34,11 +34,17 @@ function amortizationDuration(p: CostPoint): number | null {
   return p.amortizationMonths
 }
 
+/** Splits whole cents across buckets without losing the remainder. */
+function allocatedCents(totalCents: number, buckets: number, index: number): number {
+  const base = Math.floor(totalCents / buckets)
+  return base + (index < totalCents % buckets ? 1 : 0)
+}
+
 /**
  * Effective cost for the calendar month containing `now`, in cents.
  *
  * The day within the month is intentionally ignored so timeline sampling on
- * the first and last day produces the same value. Not rounded; round at display time.
+ * the first and last day produces the same value. The result is always whole cents.
  */
 export function monthlyCents(p: CostPoint, now: Date = new Date()): number {
   const month = utcMonth(now)
@@ -50,17 +56,27 @@ export function monthlyCents(p: CostPoint, now: Date = new Date()): number {
     case 'monthly':
       return p.costCents
     case 'yearly':
-      return p.costCents / 12
+      return allocatedCents(p.costCents, 12, monthOffset(startMonth, month) % 12)
     case 'custom': {
       const months = intervalMonths(p)
-      return months > 0 ? p.costCents / months : 0
+      return months > 0 ? Math.round(p.costCents / months) : 0
     }
     case 'one_time': {
       const duration = amortizationDuration(p)
       if (duration === null) return month === startMonth ? p.costCents : 0
-      return monthOffset(startMonth, month) < duration ? p.costCents / duration : 0
+      const offset = monthOffset(startMonth, month)
+      return offset < duration ? allocatedCents(p.costCents, duration, offset) : 0
     }
   }
+}
+
+/** Current annualized run rate in whole cents. */
+export function annualizedCents(p: CostPoint, now: Date = new Date()): number {
+  const current = monthlyCents(p, now)
+  if (current === 0) return 0
+  if (p.cadence === 'monthly') return p.costCents * 12
+  if (p.cadence === 'yearly') return p.costCents
+  return current * 12
 }
 
 /**

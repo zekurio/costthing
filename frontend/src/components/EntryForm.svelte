@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Dialog from './Dialog.svelte'
   import Select from './Select.svelte'
   import { categoryColor, categoryTextColor } from '../lib/format.ts'
   import { COST_ICONS } from '../lib/icons.ts'
@@ -80,7 +81,9 @@
   // can still override it afterwards (the icon is saved per category)
   $effect(() => {
     const trimmed = category.trim()
-    if (trimmed in categoryIcons) icon = categoryIcons[trimmed] ?? null
+    if (Object.prototype.hasOwnProperty.call(categoryIcons, trimmed)) {
+      icon = categoryIcons[trimmed] ?? null
+    }
     else icon = null
   })
   let cadence = $state<Cadence>(initialCost?.cadence ?? 'monthly')
@@ -98,6 +101,8 @@
   // linked server-side, so the picker only shows for admins
   // svelte-ignore state_referenced_locally
   let donationUserId = $state(initialDonation?.userId ?? '')
+  // existing links and picker changes are explicit; inferred links may follow name edits
+  let donationLinkTouched = $state(initialDonation?.userId !== null && initialDonation !== null)
 
   const userOptions = $derived([
     { value: '', label: 'kein Konto (extern)' },
@@ -113,30 +118,40 @@
     if (user && !name.trim()) name = user.name
   })
 
-  // mirrors the server rule (one donor name → one identity): a donation whose
-  // name matches an account gets linked automatically, so preselect the match
-  // to make that visible before saving
+  // mirrors the server rule while keeping inferred selections in sync with name edits
   $effect(() => {
-    if (donationUserId) return
+    if (donationLinkTouched) return
     const needle = name.trim().toLowerCase()
-    if (!needle) return
-    const matches = knownUsers.filter((u) => u.name.trim().toLowerCase() === needle)
+    const matches = needle
+      ? knownUsers.filter((u) => u.name.trim().toLowerCase() === needle)
+      : []
     const active = matches.filter((u) => !u.archived)
     const match = active.length === 1
       ? active[0]
       : active.length === 0 && matches.length === 1
         ? matches[0]
         : null
-    if (match) donationUserId = match.id
+    donationUserId = match?.id ?? ''
   })
+
+  const editorTitle = $derived(
+    donorOnly
+      ? 'Spende melden'
+      : initial
+        ? (kind === 'cost' ? 'Kostenpunkt bearbeiten' : 'Spende bearbeiten')
+        : 'Eintrag hinzufügen',
+  )
 
   let error = $state('')
   let busy = $state(false)
 
   function parseAmount(raw: string): number | null {
-    const value = Number(raw.replace(',', '.'))
-    if (!Number.isFinite(value) || value < 0) return null
-    return Math.round(value * 100)
+    const match = raw.trim().match(/^(\d+)(?:[.,](\d{1,2}))?$/)
+    if (!match) return null
+    const euros = Number(match[1])
+    const fraction = (match[2] ?? '').padEnd(2, '0')
+    const cents = euros * 100 + Number(fraction)
+    return Number.isSafeInteger(cents) ? cents : null
   }
 
   async function submit(event: SubmitEvent) {
@@ -150,17 +165,21 @@
       return
     }
     if (kind === 'cost') {
+      if (endsOn && endsOn < startsOn) {
+        error = 'Ende liegt vor dem Beginn.'
+        return
+      }
       if (cadence === 'one_time' && (!amortizationMonths || amortizationMonths < 1)) {
         error = 'Abschreibung muss mindestens 1 Monat sein.'
+        return
+      }
+      if (cadence === 'custom' && (!intervalCount || intervalCount < 1)) {
+        error = 'Das Intervall muss mindestens 1 sein.'
         return
       }
     } else if (donationEndsOn && donationEndsOn < receivedOn) {
       error = 'Ende liegt vor dem Beginn.'
       return
-      if (endsOn && endsOn < startsOn) {
-        error = 'Ende liegt vor dem Beginn.'
-        return
-      }
     }
     busy = true
     error = ''
@@ -195,16 +214,8 @@
   }
 </script>
 
-<div class="overlay" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
-  <form class="modal" onsubmit={submit}>
-    <h2>
-      {donorOnly
-        ? 'Spende melden'
-        : initial
-          ? (kind === 'cost' ? 'Kostenpunkt bearbeiten' : 'Spende bearbeiten')
-          : 'Eintrag hinzufügen'}
-    </h2>
-
+<Dialog title={editorTitle} {onclose} size="form">
+  <form onsubmit={submit}>
     {#if donorOnly}
       <span class="help">
         Deine Spende erscheint als „ausstehend“ und zählt erst, sobald ein Admin sie bestätigt hat.
@@ -212,14 +223,13 @@
     {:else}
       <div
         class="kind-toggle"
-        role="tablist"
+        role="group"
         aria-label="Eintragstyp"
         title={initial ? 'Typ kann beim Bearbeiten nicht geändert werden' : ''}
       >
         <button
           type="button"
-          role="tab"
-          aria-selected={kind === 'cost'}
+          aria-pressed={kind === 'cost'}
           class:active={kind === 'cost'}
           disabled={initial !== null}
           onclick={() => (kind = 'cost')}
@@ -228,8 +238,7 @@
         </button>
         <button
           type="button"
-          role="tab"
-          aria-selected={kind === 'donation'}
+          aria-pressed={kind === 'donation'}
           class:active={kind === 'donation'}
           disabled={initial !== null}
           onclick={() => (kind = 'donation')}
@@ -263,6 +272,7 @@
                 type="button"
                 class="cat-chip"
                 class:active={category.trim() === cat}
+                aria-pressed={category.trim() === cat}
                 onclick={() => (category = cat)}
               >
                 <span class="chip-dot" style:background={categoryColor(cat)}></span>
@@ -283,6 +293,8 @@
             style:color={category.trim() ? categoryTextColor(category.trim()) : undefined}
             onclick={() => (icon = null)}
             title="kein Icon (Buchstabe)"
+            aria-label="kein Icon, Anfangsbuchstabe verwenden"
+            aria-pressed={icon === null}
           >
             {category.trim().charAt(0).toUpperCase() || 'A'}
           </button>
@@ -293,6 +305,8 @@
               class:active={icon === iconName}
               onclick={() => (icon = iconName)}
               title={iconName}
+              aria-label={`Icon ${iconName}`}
+              aria-pressed={icon === iconName}
             >
               <Icon size={17} />
             </button>
@@ -302,7 +316,7 @@
 
       <div class="row">
         <label>
-          Betrag (€)
+          Betrag
           <input bind:value={amount} required inputmode="decimal" placeholder="10,40" />
         </label>
         <label>
@@ -365,7 +379,11 @@
       {#if !donorOnly && knownUsers.length > 0}
         <label>
           Jellyfin-Konto (optional)
-          <Select bind:value={donationUserId} options={userOptions} />
+          <Select
+            bind:value={donationUserId}
+            options={userOptions}
+            onchange={() => (donationLinkTouched = true)}
+          />
           <span class="help">
             Stimmt der Name genau mit einem Konto oder einer bereits verknüpften Spende überein,
             wird automatisch verknüpft. Gelöschte Konten bleiben als „archiviert“ wählbar, damit
@@ -375,7 +393,7 @@
       {/if}
       <div class="row">
         <label>
-          Betrag (€)
+          Betrag
           <input bind:value={amount} required inputmode="decimal" placeholder="5,00" />
         </label>
         <label>
@@ -409,47 +427,22 @@
       </span>
     {/if}
 
-    {#if error}<p class="error">{error}</p>{/if}
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
 
     <div class="actions">
-      <button type="button" class="ghost" onclick={onclose}>abbrechen</button>
-      <button type="submit" class="primary" disabled={busy}>
+      <button type="button" class="btn ghost" onclick={onclose}>abbrechen</button>
+      <button type="submit" class="btn primary" disabled={busy}>
         {busy ? 'speichere…' : donorOnly ? 'zur Bestätigung senden' : 'speichern'}
       </button>
     </div>
   </form>
-</div>
+</Dialog>
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgb(40 50 60 / 0.4);
-    display: grid;
-    place-items: center;
-    padding: 20px;
-    z-index: 10;
-  }
-
-  .modal {
-    width: min(440px, 100%);
-    max-height: 90vh;
-    overflow-y: auto;
-    background: var(--surface);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
-    padding: 24px;
+  form {
     display: flex;
     flex-direction: column;
     gap: 14px;
-  }
-
-  h2 {
-    margin: 0;
-    font-family: var(--font-display);
-    font-size: 22px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
   }
 
   .kind-toggle {
@@ -596,30 +589,20 @@
   }
 
   .primary {
-    background: var(--accent);
-    color: var(--on-accent);
-    font-weight: 600;
-    border-radius: 99px;
     padding: 9px 20px;
-    transition: background 120ms ease;
-  }
-
-  .primary:hover:not(:disabled) {
-    background: var(--accent-strong);
-  }
-
-  .primary:disabled {
-    opacity: 0.5;
   }
 
   .ghost {
-    color: var(--muted);
-    border-radius: 99px;
     padding: 9px 16px;
   }
 
-  .ghost:hover {
-    background: var(--surface-2);
-    color: var(--ink);
+  @media (max-width: 420px) {
+    .row {
+      grid-template-columns: 1fr;
+    }
+
+    .icon-grid {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
   }
 </style>

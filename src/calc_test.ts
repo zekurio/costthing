@@ -1,6 +1,11 @@
 import { strict as assert } from 'node:assert'
 import type { CostPoint, Donation, IntervalUnit } from '../shared/types.ts'
-import { amortizationElapsed, donationCentsForMonth, monthlyCents } from './calc.ts'
+import {
+  amortizationElapsed,
+  annualizedCents,
+  donationCentsForMonth,
+  monthlyCents,
+} from './calc.ts'
 
 function utcDate(date: string): Date {
   return new Date(`${date}T00:00:00.000Z`)
@@ -85,6 +90,18 @@ Deno.test('recurring costs use whole start and end calendar months', () => {
   }
 })
 
+Deno.test('yearly costs distribute cents while preserving their annual face value', () => {
+  const point = cost({ cadence: 'yearly', costCents: 4_999 })
+  const months = Array.from(
+    { length: 12 },
+    (_, offset) => monthlyCents(point, monthBoundary(point.startsOn, offset, false)),
+  )
+
+  assert.ok(months.every(Number.isInteger))
+  assert.equal(months.reduce((sum, value) => sum + value, 0), 4_999)
+  assert.equal(annualizedCents(point, utcDate('2026-07-01')), 4_999)
+})
+
 Deno.test('custom costs convert every supported interval to months', () => {
   const cases: Array<{ unit: IntervalUnit; count: number; intervalMonths: number }> = [
     { unit: 'days', count: 30, intervalMonths: (30 * 12) / 365.25 },
@@ -95,7 +112,11 @@ Deno.test('custom costs convert every supported interval to months', () => {
 
   for (const { unit, count, intervalMonths } of cases) {
     const point = cost({ cadence: 'custom', intervalCount: count, intervalUnit: unit })
-    assert.equal(monthlyCents(point, utcDate('2026-07-01')), 12_000 / intervalMonths, unit)
+    assert.equal(
+      monthlyCents(point, utcDate('2026-07-01')),
+      Math.round(12_000 / intervalMonths),
+      unit,
+    )
   }
 
   assert.equal(
@@ -162,6 +183,20 @@ Deno.test('January 31 and leap-day amortization use calendar months without over
   assert.equal(monthlyCents(leapDay, utcDate('2025-03-01')), 0)
 })
 
+Deno.test('amortization distributes remainder cents without losing money', () => {
+  const point = cost({
+    cadence: 'one_time',
+    costCents: 100,
+    startsOn: '2026-01-31',
+    amortizationMonths: 3,
+  })
+  const values = ['2026-01-01', '2026-02-01', '2026-03-01'].map((date) =>
+    monthlyCents(point, utcDate(date))
+  )
+  assert.deepEqual(values, [34, 33, 33])
+  assert.equal(values.reduce((sum, value) => sum + value, 0), 100)
+})
+
 Deno.test('amortization always occupies exactly N calendar-month buckets', () => {
   const startDates = [
     '2023-01-31',
@@ -184,7 +219,10 @@ Deno.test('amortization always occupies exactly N calendar-month buckets', () =>
       let totalCents = 0
 
       for (let offset = -2; offset <= duration + 2; offset += 1) {
-        const expected = offset >= 0 && offset < duration ? point.costCents / duration : 0
+        const base = Math.floor(point.costCents / duration)
+        const expected = offset >= 0 && offset < duration
+          ? base + (offset < point.costCents % duration ? 1 : 0)
+          : 0
         const first = monthlyCents(point, monthBoundary(startsOn, offset, false))
         const last = monthlyCents(point, monthBoundary(startsOn, offset, true))
         const context = `${startsOn}, ${duration} months, offset ${offset}`
@@ -197,7 +235,7 @@ Deno.test('amortization always occupies exactly N calendar-month buckets', () =>
       }
 
       assert.equal(activeBuckets, duration, `${startsOn}, ${duration} months`)
-      assert.ok(Math.abs(totalCents - point.costCents) < 1e-6)
+      assert.equal(totalCents, point.costCents)
     }
   }
 })

@@ -8,7 +8,12 @@
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <script>
       // apply theme before first paint to avoid a light flash
-      const t = localStorage.getItem('costthing.theme')
+      let t = null
+      try {
+        t = localStorage.getItem('costthing.theme')
+      } catch {
+        // storage can be unavailable in hardened browser contexts
+      }
       document.documentElement.dataset.theme =
         t === 'dark' || t === 'light'
           ? t

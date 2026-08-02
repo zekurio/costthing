@@ -1,9 +1,10 @@
-import { extname, join, normalize, resolve } from 'node:path'
 import { Elysia, t } from 'elysia'
-import type { CostPoint, Coverage, Donation, Me, Summary, TimelineEntry } from '../shared/types.ts'
-import { amortizationElapsed, donationCentsForMonth, monthlyCents } from './calc.ts'
-import { Jellyfin, type JellyfinUser, parseCookies } from './auth.ts'
-import { Store } from './store.ts'
+import type { Me, Summary } from '../shared/types.ts'
+import { Jellyfin, JellyfinError, type JellyfinUser, parseCookies } from './auth.ts'
+import { amortizationElapsed, annualizedCents, monthlyCents } from './calc.ts'
+import { Store, StoreValidationError } from './store.ts'
+import { buildCoverage, buildTimeline } from './summary.ts'
+import { serveStatic } from './static.ts'
 
 const PORT = Number(Deno.env.get('PORT') ?? 8080)
 const JELLYFIN_URL = Deno.env.get('JELLYFIN_URL') ?? ''
@@ -49,35 +50,76 @@ const donationBody = t.Object({
 
 const COOKIE = 'costthing_session'
 
-// 400 days is the maximum browsers accept; the Jellyfin token stays valid
-// until it is revoked (logout or server-side), we just re-check it periodically
-function sessionCookie(token: string): string {
-  return `${COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${60 * 60 * 24 * 400}`
+function isSecure(request: Request): boolean {
+  const forwarded = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim()
+  return forwarded === 'https' || new URL(request.url).protocol === 'https:'
 }
 
-/** Resolves the session cookie to a Jellyfin user (null = not logged in). */
-async function currentUser(cookieHeader: string | null): Promise<JellyfinUser | null> {
-  const token = parseCookies(cookieHeader)[COOKIE]
-  if (!token) return null
+// 400 days is the maximum browsers accept; Jellyfin tokens remain valid until revoked.
+function sessionCookie(token: string, secure: boolean): string {
+  const flags = secure ? '; Secure' : ''
+  return `${COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${
+    60 * 60 * 24 * 400
+  }${flags}`
+}
+
+function clearSessionCookie(secure: boolean): string {
+  return `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`
+}
+
+interface CurrentSession {
+  token: string
+  user: JellyfinUser
+}
+
+const requestSessions = new WeakMap<Request, Promise<CurrentSession | null>>()
+
+function sessionToken(request: Request): string | null {
+  const encoded = parseCookies(request.headers.get('cookie'))[COOKIE]
+  if (!encoded) return null
   try {
-    return await jellyfin.user(token)
+    const token = decodeURIComponent(encoded)
+    return token.length <= 4_096 && !/[^\x20-\x7e]/.test(token) ? token : null
   } catch {
-    return null // Jellyfin unreachable — treat as logged out
+    return null
   }
+}
+
+/** Resolves a request once so nested guards and handlers share one upstream lookup. */
+function currentSession(request: Request): Promise<CurrentSession | null> {
+  const cached = requestSessions.get(request)
+  if (cached) return cached
+  const pending = (async () => {
+    const token = sessionToken(request)
+    if (!token) return null
+    const user = await jellyfin.user(token)
+    return user ? { token, user } : null
+  })()
+  requestSessions.set(request, pending)
+  return pending
 }
 
 function toMe(user: JellyfinUser): Me {
   return { name: user.name, isAdmin: user.isAdmin, hasAvatar: user.avatarTag !== null }
 }
 
+async function storeCall<T>(action: () => Promise<T>): Promise<T | Response> {
+  try {
+    return await action()
+  } catch (err) {
+    if (!(err instanceof StoreValidationError)) throw err
+    return Response.json({ error: err.message }, { status: 400 })
+  }
+}
+
 const app = new Elysia()
   .get('/api/health', () => ({ ok: true }))
   .post(
     '/api/auth',
-    async ({ body, set }) => {
+    async ({ body, request, set }) => {
       let session: Awaited<ReturnType<Jellyfin['authenticate']>>
       try {
-        session = await jellyfin.authenticate(body.username, body.password)
+        session = await jellyfin.authenticate(body.username, body.password, body.deviceId)
       } catch {
         set.status = 502
         return { error: 'Jellyfin is unreachable' }
@@ -86,37 +128,53 @@ const app = new Elysia()
         set.status = 401
         return { error: 'wrong username or password' }
       }
-      set.headers['set-cookie'] = sessionCookie(session.token)
+      set.headers['set-cookie'] = sessionCookie(session.token, isSecure(request))
       return toMe(session.user)
     },
-    { body: t.Object({ username: t.String({ minLength: 1 }), password: t.String() }) },
+    {
+      body: t.Object({
+        username: t.String({ minLength: 1 }),
+        password: t.String(),
+        deviceId: t.String({
+          minLength: 16,
+          maxLength: 100,
+          pattern: '^[A-Za-z0-9-]+$',
+        }),
+      }),
+    },
   )
-  .post('/api/logout', async ({ headers, set }) => {
-    const token = parseCookies(headers['cookie'] ?? null)[COOKIE]
-    if (token) await jellyfin.logout(token)
-    set.headers['set-cookie'] = `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`
+  .post('/api/logout', ({ request, set }) => {
+    const token = sessionToken(request)
+    set.headers['set-cookie'] = clearSessionCookie(isSecure(request))
+    if (token) void jellyfin.logout(token)
     return { ok: true }
   })
   // --- viewer area: everything below requires a valid Jellyfin session ---
   .guard(
     {
-      async beforeHandle({ headers, set }) {
-        if (!(await currentUser(headers['cookie'] ?? null))) {
-          set.status = 401
-          return { error: 'login required' }
+      async beforeHandle({ request, set }) {
+        try {
+          if (!(await currentSession(request))) {
+            set.status = 401
+            return { error: 'login required' }
+          }
+        } catch (err) {
+          if (!(err instanceof JellyfinError)) throw err
+          set.status = 503
+          return { error: 'Jellyfin is temporarily unavailable' }
         }
       },
     },
     (app) =>
       app
-        .get('/api/me', async ({ headers }): Promise<Me> => {
-          const user = (await currentUser(headers['cookie'] ?? null))!
+        .get('/api/me', async ({ request }): Promise<Me> => {
+          const { user } = (await currentSession(request))!
           return toMe(user)
         })
-        .get('/api/me/avatar', async ({ headers }) => {
-          const user = (await currentUser(headers['cookie'] ?? null))!
+        .get('/api/me/avatar', async ({ request }) => {
+          const { token, user } = (await currentSession(request))!
           if (!user.avatarTag) return new Response(null, { status: 404 })
-          return await jellyfin.avatar(user.id, user.avatarTag)
+          return await jellyfin.avatar(user.id, user.avatarTag, token)
         })
         .get('/api/summary', (): Summary => {
           const now = new Date()
@@ -134,7 +192,7 @@ const app = new Elysia()
             generatedAt: now.toISOString(),
             totals: {
               monthlyCents: totalMonthly,
-              yearlyCents: totalMonthly * 12,
+              yearlyCents: stored.reduce((sum, point) => sum + annualizedCents(point, now), 0),
               pointCount: points.length,
             },
             points,
@@ -146,22 +204,25 @@ const app = new Elysia()
         })
         // any logged-in user can report a donation for themselves — it stays
         // pending (not counted) until an admin confirms it
-        .post('/api/donations/submit', async ({ headers, body, set }) => {
-          const user = (await currentUser(headers['cookie'] ?? null))!
-          set.status = 201
+        .post('/api/donations/submit', async ({ request, body, set }) => {
+          const { user } = (await currentSession(request))!
           // self-reported donations are always linked to the submitter's account
           const { userId: _ignored, ...input } = body
-          return await store.submitDonation({ ...input, userId: user.id }, {
-            id: user.id,
-            name: user.name,
-          })
+          const result = await storeCall(() =>
+            store.submitDonation({ ...input, userId: user.id }, {
+              id: user.id,
+              name: user.name,
+            })
+          )
+          if (!(result instanceof Response)) set.status = 201
+          return result
         }, { body: donationBody })
         // --- admin area: Jellyfin administrators only ---
         .guard(
           {
-            async beforeHandle({ headers, set }) {
-              const user = await currentUser(headers['cookie'] ?? null)
-              if (!user?.isAdmin) {
+            async beforeHandle({ request, set }) {
+              const session = await currentSession(request)
+              if (!session?.user.isAdmin) {
                 set.status = 403
                 return { error: 'admin required' }
               }
@@ -172,13 +233,14 @@ const app = new Elysia()
               // Jellyfin users, past and present: syncs the archive with the
               // live server (using the admin's own token), keeps departed
               // users as archived entries for donation attribution
-              .get('/api/users', async ({ headers }) => {
-                const token = parseCookies(headers['cookie'] ?? null)[COOKIE]!
+              .get('/api/users', async ({ request }) => {
+                const { token } = (await currentSession(request))!
                 try {
                   const live = await jellyfin.users(token)
                   return await store.syncKnownUsers(live)
-                } catch {
-                  // Jellyfin unreachable — serve the archive as-is
+                } catch (err) {
+                  if (!(err instanceof JellyfinError)) throw err
+                  // Jellyfin unreachable — serve the archive as-is.
                   return store.listKnownUsers()
                 }
               })
@@ -188,22 +250,20 @@ const app = new Elysia()
                 }.json"`
                 return store.export()
               })
-              .post('/api/import', async ({ body, set }) => {
-                try {
-                  return await store.replaceFromImport(body)
-                } catch (err) {
-                  set.status = 400
-                  return { error: err instanceof Error ? err.message : 'invalid import' }
-                }
-              })
+              .post(
+                '/api/import',
+                async ({ body }) => await storeCall(() => store.replaceFromImport(body)),
+              )
               .post('/api/costs', async ({ body, set }) => {
-                set.status = 201
                 const { icon, ...input } = body
-                return await store.add(input, icon)
+                const result = await storeCall(() => store.add(input, icon))
+                if (!(result instanceof Response)) set.status = 201
+                return result
               }, { body: costBody })
               .put('/api/costs/:id', async ({ params, body, set }) => {
                 const { icon, ...input } = body
-                const updated = await store.update(Number(params.id), input, icon)
+                const updated = await storeCall(() => store.update(Number(params.id), input, icon))
+                if (updated instanceof Response) return updated
                 if (!updated) {
                   set.status = 404
                   return { error: 'not found' }
@@ -211,18 +271,22 @@ const app = new Elysia()
                 return updated
               }, { body: costBody })
               .delete('/api/costs/:id', async ({ params, set }) => {
-                if (!(await store.remove(Number(params.id)))) {
+                const removed = await storeCall(() => store.remove(Number(params.id)))
+                if (removed instanceof Response) return removed
+                if (!removed) {
                   set.status = 404
                   return { error: 'not found' }
                 }
                 return new Response(null, { status: 204 })
               })
               .post('/api/donations', async ({ body, set }) => {
-                set.status = 201
-                return await store.addDonation({ userId: null, ...body })
+                const result = await storeCall(() => store.addDonation({ userId: null, ...body }))
+                if (!(result instanceof Response)) set.status = 201
+                return result
               }, { body: donationBody })
               .post('/api/donations/:id/confirm', async ({ params, set }) => {
-                const confirmed = await store.confirmDonation(Number(params.id))
+                const confirmed = await storeCall(() => store.confirmDonation(Number(params.id)))
+                if (confirmed instanceof Response) return confirmed
                 if (!confirmed) {
                   set.status = 404
                   return { error: 'not found' }
@@ -230,10 +294,13 @@ const app = new Elysia()
                 return confirmed
               })
               .put('/api/donations/:id', async ({ params, body, set }) => {
-                const updated = await store.updateDonation(Number(params.id), {
-                  userId: null,
-                  ...body,
-                })
+                const updated = await storeCall(() =>
+                  store.updateDonation(Number(params.id), {
+                    userId: null,
+                    ...body,
+                  })
+                )
+                if (updated instanceof Response) return updated
                 if (!updated) {
                   set.status = 404
                   return { error: 'not found' }
@@ -241,7 +308,9 @@ const app = new Elysia()
                 return updated
               }, { body: donationBody })
               .delete('/api/donations/:id', async ({ params, set }) => {
-                if (!(await store.removeDonation(Number(params.id)))) {
+                const removed = await storeCall(() => store.removeDonation(Number(params.id)))
+                if (removed instanceof Response) return removed
+                if (!removed) {
                   set.status = 404
                   return { error: 'not found' }
                 }
@@ -249,115 +318,24 @@ const app = new Elysia()
               }),
         ),
   )
-  .get('*', ({ path }) => serveStatic(path))
+  .get('/api', ({ set }) => {
+    set.status = 404
+    return { error: 'not found' }
+  })
+  .get('/api/*', ({ set }) => {
+    set.status = 404
+    return { error: 'not found' }
+  })
+  .get(
+    '*',
+    ({ path, request }) =>
+      serveStatic(
+        path,
+        request.headers.get('accept') ?? '',
+        STATIC_DIR,
+        request.headers.get('accept-encoding') ?? '',
+      ),
+  )
 
 Deno.serve({ port: PORT }, app.fetch)
 console.log(`costthing listening on http://localhost:${PORT}`)
-
-function donatedInMonth(donations: Donation[], month: string): number {
-  return donations.reduce((sum, donation) => sum + donationCentsForMonth(donation, month), 0)
-}
-
-function buildTimeline(
-  points: CostPoint[],
-  donations: Donation[],
-  now: Date,
-): TimelineEntry[] {
-  if (points.length === 0 && donations.length === 0) return []
-  const earliest = [
-    ...points.map((p) => p.startsOn),
-    ...donations.map((d) => d.receivedOn),
-  ].sort()[0]!
-  const [startYear, startMonth] = earliest.split('-').map(Number)
-  const cursor = new Date(Date.UTC(startYear ?? 1970, (startMonth ?? 1) - 1, 1))
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 12, 1))
-
-  const entries: TimelineEntry[] = []
-  while (cursor <= end) {
-    const y = cursor.getUTCFullYear()
-    const m = cursor.getUTCMonth()
-    // sample first and last day of the month, so windows starting or ending
-    // mid-month still count for that month
-    const first = new Date(Date.UTC(y, m, 1))
-    const last = new Date(Date.UTC(y, m + 1, 0))
-    const categories: Record<string, number> = {}
-    let totalCents = 0
-    for (const p of points) {
-      const value = Math.max(monthlyCents(p, first), monthlyCents(p, last))
-      if (value > 0) {
-        categories[p.category] = (categories[p.category] ?? 0) + value
-        totalCents += value
-      }
-    }
-    const month = `${y}-${String(m + 1).padStart(2, '0')}`
-    entries.push({ month, totalCents, donatedCents: donatedInMonth(donations, month), categories })
-    cursor.setUTCMonth(cursor.getUTCMonth() + 1)
-  }
-  return entries
-}
-
-/**
- * Donations vs. cost for the current month. The cumulative balance only looks
- * at months from the first donation onward — cost history before donation
- * tracking started would otherwise swamp it as pure deficit.
- */
-function buildCoverage(timeline: TimelineEntry[], donations: Donation[], now: Date): Coverage {
-  const month = now.toISOString().slice(0, 7)
-  const current = timeline.find((t) => t.month === month)
-  const costCents = current?.totalCents ?? 0
-  const donatedCents = current?.donatedCents ?? 0
-
-  let cumulativeBalanceCents = 0
-  if (donations.length > 0) {
-    const firstMonth = donations.map((d) => d.receivedOn.slice(0, 7)).sort()[0]!
-    for (const entry of timeline) {
-      if (entry.month < firstMonth || entry.month > month) continue
-      cumulativeBalanceCents += entry.donatedCents - entry.totalCents
-    }
-  }
-
-  return {
-    month,
-    costCents,
-    donatedCents,
-    balanceCents: donatedCents - costCents,
-    cumulativeBalanceCents,
-  }
-}
-
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.json': 'application/json',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-}
-
-async function serveStatic(pathname: string): Promise<Response> {
-  const rel = normalize(decodeURIComponent(pathname)).replace(/^(\.\.([/\\]|$))+/, '')
-  const file = join(STATIC_DIR, rel === '/' || rel === '.' ? 'index.html' : rel)
-  if (!resolve(file).startsWith(resolve(STATIC_DIR))) {
-    return new Response('forbidden', { status: 403 })
-  }
-  try {
-    const data = await Deno.readFile(file)
-    const immutable = file.includes(`${'/'}assets/`)
-    return new Response(data, {
-      headers: {
-        'content-type': MIME[extname(file)] ?? 'application/octet-stream',
-        'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
-      },
-    })
-  } catch {
-    try {
-      const data = await Deno.readFile(join(STATIC_DIR, 'index.html'))
-      return new Response(data, { headers: { 'content-type': MIME['.html']! } })
-    } catch {
-      return new Response('frontend not built — run `deno task frontend:build`', { status: 404 })
-    }
-  }
-}

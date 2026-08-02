@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api.ts'
 
-  let { onunlock }: { onunlock: () => void } = $props()
+  let { onunlock }: { onunlock: () => Promise<void> } = $props()
 
   let username = $state('')
   let password = $state('')
@@ -15,12 +15,12 @@
     error = ''
     try {
       await api.login(username.trim(), password)
-      onunlock()
+      await onunlock()
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         error = 'Falsche Zugangsdaten – noch einmal versuchen.'
         password = ''
-      } else if (err instanceof ApiError && err.status === 502) {
+      } else if (err instanceof ApiError && (err.status === 502 || err.status === 503)) {
         error = 'Jellyfin ist gerade nicht erreichbar.'
       } else {
         error = 'Etwas ist schiefgelaufen.'
@@ -50,8 +50,8 @@
       aria-label="Passwort"
       autocomplete="current-password"
     />
-    {#if error}<p class="error">{error}</p>{/if}
-    <button class="primary" type="submit" disabled={busy || !username.trim()}>
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
+    <button class="btn primary" type="submit" disabled={busy || !username.trim()}>
       {busy ? 'einen Moment…' : 'ansehen'}
     </button>
   </form>
@@ -105,20 +105,6 @@
   }
 
   .primary {
-    background: var(--accent);
-    color: var(--on-accent);
-    font-weight: 600;
-    border-radius: 99px;
     padding: 10px;
-    transition: background 120ms ease;
-  }
-
-  .primary:hover:not(:disabled) {
-    background: var(--accent-strong);
-  }
-
-  .primary:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 </style>

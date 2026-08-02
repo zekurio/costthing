@@ -205,6 +205,23 @@ Deno.test('every fetch is bounded and aborts on timeout', async () => {
   assert.equal(observed.signal?.aborted, true)
 })
 
+Deno.test('response bodies are also bounded by the timeout', async () => {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"Id":"user-1"'))
+    },
+  })
+  const transport = fakeFetch([
+    new Response(body, { headers: { 'content-type': 'application/json' } }),
+  ])
+  const jellyfin = new Jellyfin('https://jellyfin.example', {
+    fetch: transport.fetch,
+    timeoutMs: 5,
+  })
+
+  await expectJellyfinError(jellyfin.user('token'), 'timeout')
+})
+
 Deno.test('concurrent user cache misses coalesce and resolved users stay cached', async () => {
   let now = 1_000
   let resolveFirst!: (response: Response) => void
@@ -302,11 +319,10 @@ Deno.test('users sends modern token authorization and validates its response', a
   await expectJellyfinError(jellyfin.users('admin-token'), 'malformed-response')
 })
 
-Deno.test('logout sends token authorization, clears the cache, and is best effort', async () => {
+Deno.test('logout sends token authorization, revokes the local cache, and is best effort', async () => {
   const transport = fakeFetch([
     json(userDto()),
     new Error('offline'),
-    json(userDto('user-1', 'After logout')),
     new Response(null, { status: 500 }),
   ])
   const jellyfin = new Jellyfin('https://jellyfin.example', { fetch: transport.fetch })
@@ -319,9 +335,29 @@ Deno.test('logout sends token authorization, clears the cache, and is best effor
   assert.equal(headers(logoutCall).get('authorization'), 'MediaBrowser Token="token"')
   assert.equal(headers(logoutCall).has('x-emby-token'), false)
 
-  assert.equal((await jellyfin.user('token'))?.name, 'After logout')
-  assert.equal(transport.calls.length, 3)
+  assert.equal(await jellyfin.user('token'), null)
+  assert.equal(transport.calls.length, 2)
   await jellyfin.logout('another-token')
+})
+
+Deno.test('logout prevents an in-flight lookup from re-caching the token', async () => {
+  let resolveUser!: (response: Response) => void
+  const pendingResponse = new Promise<Response>((resolve) => {
+    resolveUser = resolve
+  })
+  const transport = fakeFetch([
+    () => pendingResponse,
+    new Response(null, { status: 204 }),
+  ])
+  const jellyfin = new Jellyfin('https://jellyfin.example', { fetch: transport.fetch })
+
+  const lookup = jellyfin.user('token')
+  await jellyfin.logout('token')
+  resolveUser(json(userDto()))
+
+  assert.equal(await lookup, null)
+  assert.equal(await jellyfin.user('token'), null)
+  assert.equal(transport.calls.length, 2)
 })
 
 Deno.test('avatar authenticates upstream and always returns no-store responses', async () => {

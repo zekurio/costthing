@@ -34,7 +34,7 @@
 
   let active = $state<string | null>(null)
 
-  const totalRounded = $derived(`${Math.round(total / 100).toLocaleString('de-DE')} €`)
+  const formattedTotal = $derived(cents(fmt, total))
 </script>
 
 <div class="pie-wrap">
@@ -61,7 +61,7 @@
         <title>{seg.name}: {cents(fmt, seg.monthlyCents)} ({Math.round(seg.frac * 100)} %)</title>
       </circle>
     {/each}
-    <text x="110" y="106" text-anchor="middle" class="center-value">{totalRounded}</text>
+    <text x="110" y="106" text-anchor="middle" class="center-value">{formattedTotal}</text>
     <text x="110" y="128" text-anchor="middle" class="center-label">pro Monat</text>
   </svg>
 

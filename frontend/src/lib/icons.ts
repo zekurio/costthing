@@ -1,32 +1,30 @@
-import {
-  Bell,
-  Clapperboard,
-  Cloud,
-  Cpu,
-  CreditCard,
-  Database,
-  Fan,
-  Film,
-  Gamepad2,
-  Globe,
-  HardDrive,
-  KeyRound,
-  Lock,
-  Mail,
-  MemoryStick,
-  Monitor,
-  Music,
-  Package,
-  Plug,
-  Receipt,
-  Router,
-  Server,
-  Shield,
-  Tv,
-  Wifi,
-  Wrench,
-  Zap,
-} from 'lucide-svelte'
+import Bell from 'lucide-svelte/icons/bell'
+import Clapperboard from 'lucide-svelte/icons/clapperboard'
+import Cloud from 'lucide-svelte/icons/cloud'
+import Cpu from 'lucide-svelte/icons/cpu'
+import CreditCard from 'lucide-svelte/icons/credit-card'
+import Database from 'lucide-svelte/icons/database'
+import Fan from 'lucide-svelte/icons/fan'
+import Film from 'lucide-svelte/icons/film'
+import Gamepad2 from 'lucide-svelte/icons/gamepad-2'
+import Globe from 'lucide-svelte/icons/globe'
+import HardDrive from 'lucide-svelte/icons/hard-drive'
+import KeyRound from 'lucide-svelte/icons/key-round'
+import Lock from 'lucide-svelte/icons/lock'
+import Mail from 'lucide-svelte/icons/mail'
+import MemoryStick from 'lucide-svelte/icons/memory-stick'
+import Monitor from 'lucide-svelte/icons/monitor'
+import Music from 'lucide-svelte/icons/music'
+import Package from 'lucide-svelte/icons/package'
+import Plug from 'lucide-svelte/icons/plug'
+import Receipt from 'lucide-svelte/icons/receipt'
+import Router from 'lucide-svelte/icons/router'
+import Server from 'lucide-svelte/icons/server'
+import Shield from 'lucide-svelte/icons/shield'
+import Tv from 'lucide-svelte/icons/tv'
+import Wifi from 'lucide-svelte/icons/wifi'
+import Wrench from 'lucide-svelte/icons/wrench'
+import Zap from 'lucide-svelte/icons/zap'
 
 /**
  * Curated lucide icons selectable per cost entry. Keys are stored in the

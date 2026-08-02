@@ -33,7 +33,13 @@
   const maxCents = $derived(
     niceScaleMax(Math.max(1, ...timeline.map((t) => Math.max(t.totalCents, t.donatedCents)))),
   )
-  const nowIdx = $derived(Math.max(0, timeline.findIndex((t) => t.month === nowMonth)))
+  const exactNowIdx = $derived(timeline.findIndex((t) => t.month === nowMonth))
+  const nowIdx = $derived.by(() => {
+    if (exactNowIdx >= 0) return exactNowIdx
+    const firstFuture = timeline.findIndex((t) => t.month > nowMonth)
+    if (firstFuture === -1) return Math.max(0, n - 1)
+    return Math.max(0, firstFuture - 1)
+  })
 
   function x(i: number): number {
     return PAD_L + (n <= 1 ? 0 : (i / (n - 1)) * INNER_W)
@@ -84,15 +90,16 @@
 
   // ---- stock-style header: current value + deltas ----
 
-  const current = $derived(timeline[nowIdx]?.totalCents ?? 0)
-  const prev = $derived(nowIdx > 0 ? timeline[nowIdx - 1]?.totalCents : undefined)
-  const yearAgo = $derived(nowIdx >= 12 ? timeline[nowIdx - 12]?.totalCents : undefined)
+  const current = $derived(coverage.costCents)
+  const prev = $derived(exactNowIdx > 0 ? timeline[exactNowIdx - 1]?.totalCents : undefined)
+  const yearAgo = $derived(exactNowIdx >= 12 ? timeline[exactNowIdx - 12]?.totalCents : undefined)
 
   // ---- hover ----
 
   let hover = $state<number | null>(null)
 
   function onMove(event: PointerEvent) {
+    if (n === 0) return
     const svg = event.currentTarget as SVGSVGElement
     const rect = svg.getBoundingClientRect()
     const frac = (event.clientX - rect.left) / rect.width
@@ -100,7 +107,10 @@
     hover = Math.min(Math.max(i, 0), n - 1)
   }
 
-  const hoverEntry = $derived(hover !== null ? timeline[hover] : null)
+  const hoverEntry = $derived(hover !== null ? timeline[hover] ?? null : null)
+  const hoverPoint = $derived(hover !== null ? pts[hover] ?? null : null)
+  const controlIndex = $derived(hover ?? (exactNowIdx >= 0 ? exactNowIdx : nowIdx))
+  const controlEntry = $derived(timeline[controlIndex] ?? null)
 
   const hoverDonY = $derived.by(() => {
     if (hover === null || !donActive) return null
@@ -207,8 +217,9 @@
       <text x={PAD_L + 2} y={y(maxCents * f) - 5} class="grid-label">{cents(fmt, maxCents * f)}</text>
     {/each}
     <line x1={PAD_L} x2={W - PAD_R} y1={y(0)} y2={y(0)} class="axis" />
-    {#if pts[nowIdx]}
-      <line x1={pts[nowIdx].X} x2={pts[nowIdx].X} y1={PAD_TOP} y2={y(0)} class="now-line" />
+    {#if exactNowIdx >= 0 && pts[exactNowIdx]}
+      {@const nowPoint = pts[exactNowIdx]}
+      <line x1={nowPoint.X} x2={nowPoint.X} y1={PAD_TOP} y2={y(0)} class="now-line" />
     {/if}
 
     <path d={areaPath} class="area" />
@@ -224,8 +235,9 @@
     <path d={futurePath} class="line future" />
     <path d={solidPath} class="line" />
 
-    {#if pts[nowIdx]}
-      <circle cx={pts[nowIdx].X} cy={pts[nowIdx].Y} r="3.5" class="now-dot" />
+    {#if exactNowIdx >= 0 && pts[exactNowIdx]}
+      {@const nowPoint = pts[exactNowIdx]}
+      <circle cx={nowPoint.X} cy={nowPoint.Y} r="3.5" class="now-dot" />
     {/if}
     {#if donNow}
       <circle cx={donNow.X} cy={donNow.Y} r="3.5" class="now-dot don" />
@@ -242,20 +254,41 @@
       {/if}
     {/each}
 
-    {#if hover !== null && pts[hover]}
-      <line x1={pts[hover].X} x2={pts[hover].X} y1={PAD_TOP - 8} y2={y(0)} class="crosshair" />
-      <circle cx={pts[hover].X} cy={pts[hover].Y} r="4.5" class="hover-dot" />
+    {#if hoverPoint}
+      <line x1={hoverPoint.X} x2={hoverPoint.X} y1={PAD_TOP - 8} y2={y(0)} class="crosshair" />
+      <circle cx={hoverPoint.X} cy={hoverPoint.Y} r="4.5" class="hover-dot" />
       {#if hoverDonY !== null}
-        <circle cx={pts[hover].X} cy={hoverDonY} r="4" class="hover-dot don" />
+        <circle cx={hoverPoint.X} cy={hoverDonY} r="4" class="hover-dot don" />
       {/if}
     {/if}
   </svg>
 
-  {#if hover !== null && hoverEntry && pts[hover]}
+  {#if n > 0}
+    <input
+      class="chart-control"
+      type="range"
+      min="0"
+      max={n - 1}
+      value={controlIndex}
+      aria-label="Monat im Verlauf auswählen"
+      aria-valuetext={controlEntry
+        ? `${monthLabel(controlEntry.month)}: ${cents(fmt, controlEntry.totalCents)} Kosten, ${cents(fmt, controlEntry.donatedCents)} Spenden`
+        : undefined}
+      onfocus={() => (hover = exactNowIdx >= 0 ? exactNowIdx : nowIdx)}
+      onblur={() => (hover = null)}
+      oninput={(event) => (hover = Number(event.currentTarget.value))}
+    />
+  {/if}
+
+  {#if hoverEntry && hoverPoint}
     <div
       class="tooltip"
-      style:left="{(pts[hover].X / W) * 100}%"
-      style:top="{(pts[hover].Y / H) * 100}%"
+      role="status"
+      class:align-left={hoverPoint.X < W * 0.15}
+      class:align-right={hoverPoint.X > W * 0.85}
+      class:below={hoverPoint.Y < H * 0.25}
+      style:left="{(hoverPoint.X / W) * 100}%"
+      style:top="{(hoverPoint.Y / H) * 100}%"
     >
       <span class="tip-month">{monthLabel(hoverEntry.month)}</span>
       <span class="tip-row"><i class="swatch cost"></i>{cents(fmt, hoverEntry.totalCents)}</span>
@@ -474,7 +507,18 @@
     width: 100%;
     height: auto;
     display: block;
-    touch-action: none;
+    touch-action: pan-y;
+  }
+
+  .chart-control {
+    width: 100%;
+    height: 16px;
+    margin: -2px 0 0;
+    padding: 0;
+    accent-color: var(--accent);
+    background: transparent;
+    border: 0;
+    box-shadow: none;
   }
 
   .grid {
@@ -573,6 +617,26 @@
     gap: 2px;
     pointer-events: none;
     white-space: nowrap;
+  }
+
+  .tooltip.align-left {
+    transform: translate(0, -130%);
+  }
+
+  .tooltip.align-right {
+    transform: translate(-100%, -130%);
+  }
+
+  .tooltip.below {
+    transform: translate(-50%, 20%);
+  }
+
+  .tooltip.align-left.below {
+    transform: translate(0, 20%);
+  }
+
+  .tooltip.align-right.below {
+    transform: translate(-100%, 20%);
   }
 
   .tip-month {

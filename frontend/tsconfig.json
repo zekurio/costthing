@@ -3,6 +3,7 @@
   "compilerOptions": {
     "allowImportingTsExtensions": true,
     "noEmit": true,
+    "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
     "types": ["vite/client"]
   },

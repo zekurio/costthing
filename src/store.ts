@@ -10,6 +10,11 @@ import type {
 
 const MAX_AMORTIZATION_MONTHS = 1200
 const MAX_INTERVAL_COUNT = 100_000
+const MAX_COST_CENTS = Math.floor(Number.MAX_SAFE_INTEGER / 12)
+
+export class StoreValidationError extends Error {
+  override name = 'StoreValidationError'
+}
 
 /**
  * The on-disk format is exactly the export format, so a previous export can be
@@ -18,6 +23,7 @@ const MAX_INTERVAL_COUNT = 100_000
 export class Store {
   #file: string
   #data: CostFile
+  #committedData: CostFile
   #costIdHighWater: number
   #donationIdHighWater: number
   #writeQueue: Promise<void> = Promise.resolve()
@@ -30,6 +36,7 @@ export class Store {
   ) {
     this.#file = file
     this.#data = data
+    this.#committedData = clone(data)
     this.#costIdHighWater = costIdHighWater
     this.#donationIdHighWater = donationIdHighWater
   }
@@ -38,7 +45,7 @@ export class Store {
     const raw = await readOptionalTextFile(file)
     let data: CostFile
     if (raw !== null) {
-      data = normalizeCostFile(JSON.parse(raw))
+      data = normalizeCostFile(JSON.parse(raw), false)
     } else {
       console.log(`[store] no data file at ${file}, starting empty`)
       data = {
@@ -55,7 +62,15 @@ export class Store {
     // A deletion's previous state is normally still in the one-step backup.
     // It is a useful best-effort high-water seed without changing schema v1.
     const backupRaw = await readOptionalTextFile(`${file}.bak`)
-    const backup = backupRaw === null ? null : normalizeCostFile(JSON.parse(backupRaw))
+    let backup: CostFile | null = null
+    if (backupRaw !== null) {
+      try {
+        backup = normalizeCostFile(JSON.parse(backupRaw), false)
+      } catch {
+        // A damaged optional backup must not prevent a valid primary file from starting.
+        console.warn(`[store] ignoring invalid backup at ${file}.bak`)
+      }
+    }
     const store = new Store(
       file,
       data,
@@ -71,15 +86,15 @@ export class Store {
   }
 
   get currency(): string {
-    return this.#data.currency
+    return this.#committedData.currency
   }
 
   get categoryIcons(): Record<string, string> {
-    return { ...this.#data.categoryIcons }
+    return { ...this.#committedData.categoryIcons }
   }
 
   list(): CostPoint[] {
-    return clone(this.#data.costPoints).sort((a, b) => b.id - a.id)
+    return clone(this.#committedData.costPoints).sort((a, b) => b.id - a.id)
   }
 
   async add(input: CostInput, icon?: string | null): Promise<CostPoint> {
@@ -127,7 +142,7 @@ export class Store {
   }
 
   listKnownUsers(): KnownUser[] {
-    return clone(this.#data.knownUsers).sort((a, b) =>
+    return clone(this.#committedData.knownUsers).sort((a, b) =>
       Number(a.archived) - Number(b.archived) || a.name.localeCompare(b.name)
     )
   }
@@ -150,16 +165,18 @@ export class Store {
       }
 
       await this.#persist()
-      return this.listKnownUsers()
+      return clone(this.#data.knownUsers).sort((a, b) =>
+        Number(a.archived) - Number(b.archived) || a.name.localeCompare(b.name)
+      )
     })
   }
 
   /** exact-name lookup among known users — active accounts win over archived, ambiguity yields null */
-  #userByName(name: string, excludedIds: Set<string>): KnownUser | null {
+  #userByName(name: string): KnownUser | null {
     const needle = name.trim().toLowerCase()
     if (!needle) return null
     const matches = this.#data.knownUsers.filter((user) =>
-      !excludedIds.has(user.id) && user.name.trim().toLowerCase() === needle
+      user.name.trim().toLowerCase() === needle
     )
     const active = matches.filter((user) => !user.archived)
     if (active.length === 1) return active[0]!
@@ -175,12 +192,10 @@ export class Store {
   #reconcileDonationLinks(): boolean {
     const claimed = new Map<string, string | null>()
     const pendingNames = new Set<string>()
-    const pendingUserIds = new Set<string>()
     for (const donation of this.#data.donations) {
       const key = donation.name.trim().toLowerCase()
       if (donation.status === 'pending') {
         pendingNames.add(key)
-        if (donation.userId) pendingUserIds.add(donation.userId)
         continue
       }
       if (!donation.userId) continue
@@ -203,7 +218,7 @@ export class Store {
         continue
       }
       if (pendingNames.has(key)) continue
-      const user = this.#userByName(donation.name, pendingUserIds)
+      const user = this.#userByName(donation.name)
       if (user) {
         donation.userId = user.id
         changed = true
@@ -238,7 +253,7 @@ export class Store {
   }
 
   listDonations(): Donation[] {
-    return clone(this.#data.donations).sort(
+    return clone(this.#committedData.donations).sort(
       (a, b) => b.receivedOn.localeCompare(a.receivedOn) || b.id - a.id,
     )
   }
@@ -307,6 +322,18 @@ export class Store {
         status: existing.status,
         submittedBy: existing.submittedBy,
       }
+      // A corrected manual link applies to the donor's confirmed history.
+      if (existing.status === 'confirmed' && next.userId) {
+        const donorName = next.name.trim().toLowerCase()
+        for (const donation of this.#data.donations) {
+          if (
+            donation.status === 'confirmed' &&
+            donation.name.trim().toLowerCase() === donorName
+          ) {
+            donation.userId = next.userId
+          }
+        }
+      }
       await this.#persist()
       return clone(this.#data.donations.find((donation) => donation.id === validId)!)
     })
@@ -324,7 +351,7 @@ export class Store {
   }
 
   export(): CostFile {
-    return clone({ ...this.#data, exportedAt: new Date().toISOString() })
+    return clone({ ...this.#committedData, exportedAt: new Date().toISOString() })
   }
 
   async replaceFromImport(value: unknown): Promise<CostFile> {
@@ -337,20 +364,24 @@ export class Store {
         maxId(next.donations),
       )
       await this.#persist()
-      return this.export()
+      return clone({ ...this.#data, exportedAt: new Date().toISOString() })
     })
   }
 
   #allocateCostId(): number {
     const highWater = Math.max(this.#costIdHighWater, maxId(this.#data.costPoints))
-    if (highWater === Number.MAX_SAFE_INTEGER) throw new Error('cost point id space exhausted')
+    if (highWater === Number.MAX_SAFE_INTEGER) {
+      throw new StoreValidationError('cost point id space exhausted')
+    }
     this.#costIdHighWater = highWater + 1
     return this.#costIdHighWater
   }
 
   #allocateDonationId(): number {
     const highWater = Math.max(this.#donationIdHighWater, maxId(this.#data.donations))
-    if (highWater === Number.MAX_SAFE_INTEGER) throw new Error('donation id space exhausted')
+    if (highWater === Number.MAX_SAFE_INTEGER) {
+      throw new StoreValidationError('donation id space exhausted')
+    }
     this.#donationIdHighWater = highWater + 1
     return this.#donationIdHighWater
   }
@@ -361,7 +392,9 @@ export class Store {
       const previousCostId = this.#costIdHighWater
       const previousDonationId = this.#donationIdHighWater
       try {
-        return await mutation()
+        const result = await mutation()
+        this.#committedData = clone(this.#data)
+        return result
       } catch (err) {
         this.#data = previousData
         this.#costIdHighWater = previousCostId
@@ -388,7 +421,7 @@ export class Store {
     this.#data = normalizeCostFile({
       ...this.#data,
       exportedAt: new Date().toISOString(),
-    })
+    }, false)
 
     const directory = dirname(this.#file)
     await Deno.mkdir(directory, { recursive: true })
@@ -419,11 +452,26 @@ export class Store {
   }
 }
 
-function normalizeCostFile(value: unknown): CostFile {
+function normalizeCostFile(value: unknown, strict = true): CostFile {
   const root = record(value, 'root')
-  if (root.schemaVersion !== 1) throw new Error('unsupported schemaVersion (expected 1)')
+  if (strict) {
+    knownKeys(root, 'root', [
+      'schemaVersion',
+      'currency',
+      'exportedAt',
+      'costPoints',
+      'donations',
+      'knownUsers',
+      'categoryIcons',
+    ])
+  }
+  if (root.schemaVersion !== 1) {
+    throw new StoreValidationError('unsupported schemaVersion (expected 1)')
+  }
 
-  const currency = currencyCode(root.currency, 'currency')
+  const currency = strict
+    ? currencyCode(root.currency, 'currency')
+    : string(root.currency, 'currency')
   const rawPoints = array(root.costPoints, 'costPoints')
   const rawDonations = root.donations === undefined ? [] : array(root.donations, 'donations')
   const rawKnownUsers = root.knownUsers === undefined ? [] : array(root.knownUsers, 'knownUsers')
@@ -437,8 +485,24 @@ function normalizeCostFile(value: unknown): CostFile {
   }
 
   const costPoints = rawPoints.map((value, index): CostPoint => {
-    const point = record(value, `costPoints[${index}]`)
-    const input = normalizeCostInput(point, `costPoints[${index}]`)
+    const path = `costPoints[${index}]`
+    const point = record(value, path)
+    if (strict) {
+      knownKeys(point, path, [
+        'id',
+        'name',
+        'category',
+        'costCents',
+        'cadence',
+        'startsOn',
+        'endsOn',
+        'amortizationMonths',
+        'intervalCount',
+        'intervalUnit',
+        'icon',
+      ])
+    }
+    const input = normalizeCostInput(point, path, strict)
     // legacy migration: per-point icons become the category icon (first one wins)
     const legacyIcon = nullableString(point.icon, `costPoints[${index}].icon`)
     if (legacyIcon && categoryIcons[input.category] === undefined) {
@@ -451,13 +515,27 @@ function normalizeCostFile(value: unknown): CostFile {
   })
 
   const donations = rawDonations.map((value, index): Donation => {
-    const donation = record(value, `donations[${index}]`)
-    const input = normalizeDonationInput(donation, `donations[${index}]`)
+    const path = `donations[${index}]`
+    const donation = record(value, path)
+    if (strict) {
+      knownKeys(donation, path, [
+        'id',
+        'name',
+        'amountCents',
+        'cadence',
+        'receivedOn',
+        'endsOn',
+        'status',
+        'submittedBy',
+        'userId',
+      ])
+    }
+    const input = normalizeDonationInput(donation, path, strict)
     const status = donation.status === undefined
       ? 'confirmed'
       : string(donation.status, `donations[${index}].status`)
     if (status !== 'confirmed' && status !== 'pending') {
-      throw new Error(`donations[${index}].status is invalid`)
+      throw new StoreValidationError(`donations[${index}].status is invalid`)
     }
     return {
       ...input,
@@ -471,14 +549,22 @@ function normalizeCostFile(value: unknown): CostFile {
   })
 
   const knownUsers = rawKnownUsers.map((value, index): KnownUser => {
-    const user = record(value, `knownUsers[${index}]`)
+    const path = `knownUsers[${index}]`
+    const user = record(value, path)
+    if (strict) knownKeys(user, path, ['id', 'name', 'lastSeenAt', 'archived'])
     return {
       id: string(user.id, `knownUsers[${index}].id`),
       name: string(user.name, `knownUsers[${index}].name`),
       lastSeenAt: user.lastSeenAt === undefined
         ? new Date().toISOString()
-        : timestamp(user.lastSeenAt, `knownUsers[${index}].lastSeenAt`),
-      archived: optionalBoolean(user.archived, `knownUsers[${index}].archived`, false),
+        : strict
+        ? timestamp(user.lastSeenAt, `knownUsers[${index}].lastSeenAt`)
+        : typeof user.lastSeenAt === 'string'
+        ? user.lastSeenAt
+        : new Date().toISOString(),
+      archived: strict
+        ? optionalBoolean(user.archived, `knownUsers[${index}].archived`, false)
+        : user.archived === true,
     }
   })
   uniqueStrings(knownUsers, 'knownUsers')
@@ -490,7 +576,11 @@ function normalizeCostFile(value: unknown): CostFile {
     currency,
     exportedAt: root.exportedAt === undefined
       ? new Date().toISOString()
-      : timestamp(root.exportedAt, 'exportedAt'),
+      : strict
+      ? timestamp(root.exportedAt, 'exportedAt')
+      : typeof root.exportedAt === 'string'
+      ? root.exportedAt
+      : new Date().toISOString(),
     costPoints,
     donations,
     knownUsers,
@@ -498,22 +588,30 @@ function normalizeCostFile(value: unknown): CostFile {
   }
 }
 
-function normalizeCostInput(value: unknown, path: string): CostInput {
+function normalizeCostInput(value: unknown, path: string, strict = true): CostInput {
   const point = record(value, path)
   const name = string(point.name, `${path}.name`)
   const category = string(point.category, `${path}.category`)
-  const costCents = integer(point.costCents, `${path}.costCents`, 0)
+  const costCents = integer(
+    point.costCents,
+    `${path}.costCents`,
+    0,
+    strict ? MAX_COST_CENTS : Number.MAX_SAFE_INTEGER,
+  )
   const cadence = string(point.cadence, `${path}.cadence`)
   if (
     cadence !== 'one_time' && cadence !== 'monthly' && cadence !== 'yearly' && cadence !== 'custom'
   ) {
-    throw new Error(`${path}.cadence is invalid`)
+    throw new StoreValidationError(`${path}.cadence is invalid`)
   }
 
   const startsOn = date(point.startsOn, `${path}.startsOn`)
   const endsOn = nullableDate(point.endsOn, `${path}.endsOn`)
-  if (endsOn !== null && endsOn < startsOn) {
-    throw new Error(`${path}.endsOn must be on or after ${path}.startsOn`)
+  if (strict && startsOn < '1970-01-01') {
+    throw new StoreValidationError(`${path}.startsOn must not be before 1970`)
+  }
+  if (strict && endsOn !== null && endsOn < startsOn) {
+    throw new StoreValidationError(`${path}.endsOn must be on or after ${path}.startsOn`)
   }
 
   const amortizationMonths = nullableInteger(
@@ -528,19 +626,19 @@ function normalizeCostInput(value: unknown, path: string): CostInput {
   )
   const unit = intervalUnit(point.intervalUnit, `${path}.intervalUnit`)
 
-  if (cadence === 'custom') {
+  if (strict && cadence === 'custom') {
     if (intervalCount === null || unit === null) {
-      throw new Error(
+      throw new StoreValidationError(
         `${path}.intervalCount and ${path}.intervalUnit are required for custom cadence`,
       )
     }
-  } else if (intervalCount !== null || unit !== null) {
-    throw new Error(
+  } else if (strict && (intervalCount !== null || unit !== null)) {
+    throw new StoreValidationError(
       `${path}.intervalCount and ${path}.intervalUnit are only valid for custom cadence`,
     )
   }
-  if (cadence !== 'one_time' && amortizationMonths !== null) {
-    throw new Error(`${path}.amortizationMonths is only valid for one_time cadence`)
+  if (strict && cadence !== 'one_time' && amortizationMonths !== null) {
+    throw new StoreValidationError(`${path}.amortizationMonths is only valid for one_time cadence`)
   }
 
   return {
@@ -556,7 +654,7 @@ function normalizeCostInput(value: unknown, path: string): CostInput {
   }
 }
 
-function normalizeDonationInput(value: unknown, path: string): DonationInput {
+function normalizeDonationInput(value: unknown, path: string, strict = true): DonationInput {
   const donation = record(value, path)
   const name = string(donation.name, `${path}.name`)
   const amountCents = integer(donation.amountCents, `${path}.amountCents`, 1)
@@ -564,16 +662,19 @@ function normalizeDonationInput(value: unknown, path: string): DonationInput {
     ? 'one_time'
     : string(donation.cadence, `${path}.cadence`)
   if (cadence !== 'one_time' && cadence !== 'monthly' && cadence !== 'yearly') {
-    throw new Error(`${path}.cadence is invalid`)
+    throw new StoreValidationError(`${path}.cadence is invalid`)
   }
 
   const receivedOn = date(donation.receivedOn, `${path}.receivedOn`)
   const endsOn = nullableDate(donation.endsOn, `${path}.endsOn`)
-  if (endsOn !== null && endsOn < receivedOn) {
-    throw new Error(`${path}.endsOn must be on or after ${path}.receivedOn`)
+  if (strict && receivedOn < '1970-01-01') {
+    throw new StoreValidationError(`${path}.receivedOn must not be before 1970`)
   }
-  if (cadence === 'one_time' && endsOn !== null) {
-    throw new Error(`${path}.endsOn must be null for one_time cadence`)
+  if (strict && endsOn !== null && endsOn < receivedOn) {
+    throw new StoreValidationError(`${path}.endsOn must be on or after ${path}.receivedOn`)
+  }
+  if (strict && cadence === 'one_time' && endsOn !== null) {
+    throw new StoreValidationError(`${path}.endsOn must be null for one_time cadence`)
   }
 
   return {
@@ -595,7 +696,7 @@ function normalizeUserSightings(
   )
   const ids = new Set<string>()
   for (const user of users) {
-    if (ids.has(user.id)) throw new Error(`${path} contains duplicate id ${user.id}`)
+    if (ids.has(user.id)) throw new StoreValidationError(`${path} contains duplicate id ${user.id}`)
     ids.add(user.id)
   }
   return users
@@ -611,19 +712,26 @@ function normalizeUserSighting(value: unknown, path: string): { id: string; name
 
 function record(value: unknown, path: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${path} must be an object`)
+    throw new StoreValidationError(`${path} must be an object`)
   }
   return value as Record<string, unknown>
 }
 
+function knownKeys(value: Record<string, unknown>, path: string, allowed: string[]): void {
+  const expected = new Set(allowed)
+  for (const key of Object.keys(value)) {
+    if (!expected.has(key)) throw new StoreValidationError(`${path}.${key} is not supported`)
+  }
+}
+
 function array(value: unknown, path: string): unknown[] {
-  if (!Array.isArray(value)) throw new Error(`${path} must be an array`)
+  if (!Array.isArray(value)) throw new StoreValidationError(`${path} must be an array`)
   return value
 }
 
 function string(value: unknown, path: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`${path} must be a non-empty string`)
+    throw new StoreValidationError(`${path} must be a non-empty string`)
   }
   return value
 }
@@ -645,7 +753,9 @@ function integer(
   maximum = Number.MAX_SAFE_INTEGER,
 ): number {
   if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
-    throw new Error(`${path} must be a safe integer between ${minimum} and ${maximum}`)
+    throw new StoreValidationError(
+      `${path} must be a safe integer between ${minimum} and ${maximum}`,
+    )
   }
   return value as number
 }
@@ -657,14 +767,14 @@ function nullableInteger(value: unknown, path: string, maximum: number): number 
 
 function date(value: unknown, path: string): string {
   const iso = string(value, path)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) throw new Error(`${path} must be YYYY-MM-DD`)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) throw new StoreValidationError(`${path} must be YYYY-MM-DD`)
   const [year, month, day] = iso.split('-').map(Number)
   const parsed = new Date(Date.UTC(year!, month! - 1, day!))
   if (
     parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month! - 1 ||
     parsed.getUTCDate() !== day
   ) {
-    throw new Error(`${path} is not a valid date`)
+    throw new StoreValidationError(`${path} is not a valid date`)
   }
   return iso
 }
@@ -677,7 +787,7 @@ function nullableDate(value: unknown, path: string): string | null {
 function timestamp(value: unknown, path: string): string {
   const iso = string(value, path)
   if (!/^\d{4}-\d{2}-\d{2}T/.test(iso) || !Number.isFinite(Date.parse(iso))) {
-    throw new Error(`${path} must be a valid ISO timestamp`)
+    throw new StoreValidationError(`${path} must be a valid ISO timestamp`)
   }
   date(iso.slice(0, 10), path)
   return iso
@@ -686,32 +796,36 @@ function timestamp(value: unknown, path: string): string {
 function intervalUnit(value: unknown, path: string): CostPoint['intervalUnit'] {
   if (value === undefined || value === null) return null
   if (value !== 'days' && value !== 'weeks' && value !== 'months' && value !== 'years') {
-    throw new Error(`${path} is invalid`)
+    throw new StoreValidationError(`${path} is invalid`)
   }
   return value
 }
 
 function currencyCode(value: unknown, path: string): string {
   const code = string(value, path)
-  if (!/^[A-Z]{3}$/.test(code)) throw new Error(`${path} must be a three-letter currency code`)
+  if (!/^[A-Z]{3}$/.test(code)) {
+    throw new StoreValidationError(`${path} must be a three-letter currency code`)
+  }
   try {
     new Intl.NumberFormat('de-DE', { style: 'currency', currency: code })
   } catch {
-    throw new Error(`${path} is not supported by Intl.NumberFormat`)
+    throw new StoreValidationError(`${path} is not supported by Intl.NumberFormat`)
   }
   return code
 }
 
 function optionalBoolean(value: unknown, path: string, fallback: boolean): boolean {
   if (value === undefined) return fallback
-  if (typeof value !== 'boolean') throw new Error(`${path} must be a boolean`)
+  if (typeof value !== 'boolean') throw new StoreValidationError(`${path} must be a boolean`)
   return value
 }
 
 function uniqueIds(values: Array<{ id: number }>, path: string): void {
   const ids = new Set<number>()
   for (const value of values) {
-    if (ids.has(value.id)) throw new Error(`${path} contains duplicate id ${value.id}`)
+    if (ids.has(value.id)) {
+      throw new StoreValidationError(`${path} contains duplicate id ${value.id}`)
+    }
     ids.add(value.id)
   }
 }
@@ -719,7 +833,9 @@ function uniqueIds(values: Array<{ id: number }>, path: string): void {
 function uniqueStrings(values: Array<{ id: string }>, path: string): void {
   const ids = new Set<string>()
   for (const value of values) {
-    if (ids.has(value.id)) throw new Error(`${path} contains duplicate id ${value.id}`)
+    if (ids.has(value.id)) {
+      throw new StoreValidationError(`${path} contains duplicate id ${value.id}`)
+    }
     ids.add(value.id)
   }
 }

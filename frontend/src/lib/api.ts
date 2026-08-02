@@ -18,7 +18,7 @@ export class ApiError extends Error {
 }
 
 async function req(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(path, init)
+  const res = await fetch(path, { credentials: 'same-origin', ...init })
   if (!res.ok) {
     let message = res.statusText
     try {
@@ -42,11 +42,35 @@ async function jsonReq<T>(path: string, method: string, body?: unknown): Promise
   return res.json()
 }
 
+function randomDeviceId(): string {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === 'function') return crypto.randomUUID()
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  } catch {
+    // The identifier is only for Jellyfin session isolation, not authentication.
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-costthing`
+  }
+}
+
+function deviceId(): string {
+  const key = 'costthing.device-id'
+  try {
+    const stored = localStorage.getItem(key)
+    if (stored && /^[a-zA-Z0-9-]{16,100}$/.test(stored)) return stored
+    const created = randomDeviceId()
+    localStorage.setItem(key, created)
+    return created
+  } catch {
+    return randomDeviceId()
+  }
+}
+
 export const api = {
   summary: async (): Promise<Summary> => (await req('/api/summary')).json(),
   me: async (): Promise<Me> => (await req('/api/me')).json(),
   login: (username: string, password: string) =>
-    jsonReq<Me>('/api/auth', 'POST', { username, password }),
+    jsonReq<Me>('/api/auth', 'POST', { username, password, deviceId: deviceId() }),
   logout: () => req('/api/logout', { method: 'POST' }),
   create: (input: CostSaveInput) => jsonReq<CostPoint>('/api/costs', 'POST', input),
   update: (id: number, input: CostSaveInput) => jsonReq<CostPoint>(`/api/costs/${id}`, 'PUT', input),
