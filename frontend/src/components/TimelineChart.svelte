@@ -510,15 +510,30 @@
     touch-action: pan-y;
   }
 
+  /*
+   * keyboard-only affordance: mirrors pointer hover for month selection.
+   * Kept out of flow (so tooltip top% tracks the svg height exactly) and
+   * invisible until it receives keyboard focus.
+   */
   .chart-control {
+    position: absolute;
+    left: 0;
+    bottom: -20px;
     width: 100%;
     height: 16px;
-    margin: -2px 0 0;
+    margin: 0;
     padding: 0;
     accent-color: var(--accent);
     background: transparent;
     border: 0;
     box-shadow: none;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .chart-control:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .grid {

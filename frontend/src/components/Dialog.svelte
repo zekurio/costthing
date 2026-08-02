@@ -47,7 +47,9 @@
 
 <style>
   dialog {
-    width: auto;
+    /* shrink-wrap the panel: width:auto stretches the modal dialog across the
+       viewport (UA style keeps left/right at 0), leaving the panel at the left edge */
+    width: fit-content;
     max-width: none;
     max-height: none;
     margin: auto;
