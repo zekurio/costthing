@@ -1,18 +1,15 @@
 import type { CostPoint, Donation } from '../shared/types.ts'
 
-function parseDate(iso: string): Date {
-  const [y, m, d] = iso.split('-').map(Number)
-  return new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, d ?? 1))
+function utcMonth(date: Date): string {
+  return date.toISOString().slice(0, 7)
 }
 
-function addMonths(date: Date, months: number): Date {
-  const d = new Date(date.getTime())
-  d.setUTCMonth(d.getUTCMonth() + months)
-  return d
-}
-
-function sameUtcMonth(a: Date, b: Date): boolean {
-  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth()
+function monthOffset(startMonth: string, month: string): number {
+  const startYear = Number(startMonth.slice(0, 4))
+  const startMonthIndex = Number(startMonth.slice(5, 7)) - 1
+  const year = Number(month.slice(0, 4))
+  const monthIndex = Number(month.slice(5, 7)) - 1
+  return (year - startYear) * 12 + monthIndex - startMonthIndex
 }
 
 function intervalMonths(p: CostPoint): number {
@@ -32,67 +29,52 @@ function intervalMonths(p: CostPoint): number {
   }
 }
 
-function amortizationWindow(p: CostPoint): { start: Date; end: Date } | null {
+function amortizationDuration(p: CostPoint): number | null {
   if (p.cadence !== 'one_time' || !p.amortizationMonths || p.amortizationMonths <= 0) return null
-  const start = parseDate(p.startsOn)
-  return { start, end: addMonths(start, p.amortizationMonths) }
+  return p.amortizationMonths
 }
 
-/** A point counts through the month containing endsOn, then stops. */
-function afterEnd(p: CostPoint, now: Date): boolean {
-  if (!p.endsOn) return false
-  const end = parseDate(p.endsOn)
-  return (
-    now.getUTCFullYear() > end.getUTCFullYear() ||
-    (now.getUTCFullYear() === end.getUTCFullYear() && now.getUTCMonth() > end.getUTCMonth())
-  )
-}
-
-/** Effective cost per month, in cents, as of `now`. Not rounded; round at display time. */
+/**
+ * Effective cost for the calendar month containing `now`, in cents.
+ *
+ * The day within the month is intentionally ignored so timeline sampling on
+ * the first and last day produces the same value. Not rounded; round at display time.
+ */
 export function monthlyCents(p: CostPoint, now: Date = new Date()): number {
-  if (afterEnd(p, now)) return 0
+  const month = utcMonth(now)
+  const startMonth = p.startsOn.slice(0, 7)
+  const endMonth = p.endsOn?.slice(0, 7) ?? null
+  if (month < startMonth || (endMonth && month > endMonth)) return 0
+
   switch (p.cadence) {
     case 'monthly':
+      return p.costCents
     case 'yearly':
+      return p.costCents / 12
     case 'custom': {
-      // recurring costs only count from the month they start
-      const start = parseDate(p.startsOn)
-      if (
-        now.getUTCFullYear() < start.getUTCFullYear() ||
-        (now.getUTCFullYear() === start.getUTCFullYear() &&
-          now.getUTCMonth() < start.getUTCMonth())
-      ) {
-        return 0
-      }
-      if (p.cadence === 'monthly') return p.costCents
-      if (p.cadence === 'yearly') return p.costCents / 12
       const months = intervalMonths(p)
       return months > 0 ? p.costCents / months : 0
     }
     case 'one_time': {
-      const window = amortizationWindow(p)
-      if (window) {
-        return now >= window.start && now < window.end
-          ? p.costCents / (p.amortizationMonths ?? 1)
-          : 0
-      }
-      // un-amortized one-time cost: hits the month it started, nothing after
-      return sameUtcMonth(now, parseDate(p.startsOn)) ? p.costCents : 0
+      const duration = amortizationDuration(p)
+      if (duration === null) return month === startMonth ? p.costCents : 0
+      return monthOffset(startMonth, month) < duration ? p.costCents / duration : 0
     }
   }
 }
 
-/** Months of the amortization window that have already passed, or null if not amortized. */
+/**
+ * Number of amortization calendar-month buckets reached, including the current bucket.
+ * This is 1 throughout the start month, clamps to the duration after the final month,
+ * and is 0 before the start month. Returns null when the point is not amortized.
+ */
 export function amortizationElapsed(p: CostPoint, now: Date = new Date()): number | null {
-  const window = amortizationWindow(p)
-  if (!window) return null
-  if (now < window.start) return 0
-  const total = p.amortizationMonths ?? 0
-  if (now >= window.end) return total
-  let elapsed = (now.getUTCFullYear() - window.start.getUTCFullYear()) * 12 +
-    (now.getUTCMonth() - window.start.getUTCMonth())
-  if (now.getUTCDate() >= window.start.getUTCDate()) elapsed += 1
-  return Math.min(Math.max(elapsed, 0), total)
+  const duration = amortizationDuration(p)
+  if (duration === null) return null
+  const month = utcMonth(now)
+  const startMonth = p.startsOn.slice(0, 7)
+  if (month < startMonth) return 0
+  return Math.min(monthOffset(startMonth, month) + 1, duration)
 }
 
 /** Donation amount occurring in a calendar month (YYYY-MM). */
