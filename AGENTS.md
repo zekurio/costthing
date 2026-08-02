@@ -82,11 +82,13 @@ const first = new Date(year, monthIndex, 1)
   inner one requires `isAdmin`. Put new endpoints inside the matching guard instead of adding ad-hoc
   checks.
 - Admin status comes only from Jellyfin (`Policy.IsAdministrator`); the app stores no credentials
-  and no roles. `src/auth.ts` caches token → user for 60s and treats an unreachable Jellyfin as
-  logged out.
-- `Store` (`src/store.ts`) is the only writer of the data file. Every mutation ends in `#persist()`,
-  which reconciles donation → user links, prunes icons of dead categories, copies the previous file
-  to `costs.json.bak`, and renames a `.tmp` file into place. Never touch the file directly.
+  and no roles. `src/auth.ts` caches token → user for 60s, coalesces validation requests, and keeps
+  transient Jellyfin failures distinct from an invalid session so outages do not force a relogin.
+- `Store` (`src/store.ts`) is the only writer of the data file. It serializes and validates complete
+  mutations, rolls memory back on write failures, and persists through a unique temporary file.
+  Persistence reconciles donation → user links, prunes icons of dead categories, copies the previous
+  file to `costs.json.bak`, then atomically renames the temporary file. Never touch the file
+  directly.
 - The on-disk format is exactly the export format (`CostFile`, `schemaVersion: 1`). Every read goes
   through `normalizeCostFile`, which validates and migrates legacy shapes. A new field needs the
   type in `shared/types.ts`, a branch in the normalizer, and a default for old files.

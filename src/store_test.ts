@@ -63,6 +63,46 @@ Deno.test('imports an export and normalizes legacy donations', async () => {
   }
 })
 
+Deno.test('loads and preserves schema-v1 records accepted by the previous release', async () => {
+  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
+  try {
+    const dataFile = join(directory, 'costs.json')
+    const legacy = {
+      ...exportData(),
+      exportedAt: 'legacy timestamp',
+      unknownRootField: true,
+      costPoints: [
+        {
+          ...costInput(),
+          id: 1,
+          startsOn: '1969-12-01',
+          endsOn: '1969-11-01',
+          intervalCount: 3,
+          unknownPointField: true,
+        },
+      ],
+      donations: [
+        {
+          ...exportData().donations[0],
+          cadence: 'one_time',
+          endsOn: '2026-07-02',
+        },
+      ],
+    }
+    await Deno.writeTextFile(dataFile, JSON.stringify(legacy))
+
+    const store = await Store.load(dataFile)
+    assert.equal(store.list()[0]?.endsOn, '1969-11-01')
+    assert.equal(store.listDonations()[0]?.endsOn, '2026-07-02')
+    await store.add(costInput({ name: 'New valid cost' }))
+
+    const reloaded = await Store.load(dataFile)
+    assert.equal(reloaded.list().length, 2)
+  } finally {
+    await Deno.remove(directory, { recursive: true })
+  }
+})
+
 Deno.test('keeps departed Jellyfin users as archived and re-links returning ones', async () => {
   const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
   try {
@@ -125,6 +165,14 @@ Deno.test('reconciles donor identities: name matches backfill, manual links spre
     // future donations under a claimed name inherit the identity on write
     await store.addDonation({ ...base, name: 'Kumpel' })
     assert.ok(byName('Kumpel').every((d) => d.userId === 'u2'))
+
+    // correcting a manual link updates the already linked history too
+    await store.updateDonation(byName('Kumpel')[0]!.id, {
+      ...base,
+      name: 'Kumpel',
+      userId: 'u3',
+    })
+    assert.ok(byName('Kumpel').every((d) => d.userId === 'u3'))
   } finally {
     await Deno.remove(directory, { recursive: true })
   }
@@ -190,6 +238,11 @@ Deno.test('rejects invalid imports without replacing current data', async () => 
       () => store.replaceFromImport({ ...exportData(), currency: 'EURO' }),
       /three-letter currency code/,
     )
+    const { donations: _donations, ...withoutDonations } = exportData()
+    await assert.rejects(
+      () => store.replaceFromImport({ ...withoutDonations, donatons: [] }),
+      /root\.donatons is not supported/,
+    )
     await assert.rejects(
       () =>
         store.replaceFromImport({
@@ -200,6 +253,21 @@ Deno.test('rejects invalid imports without replacing current data', async () => 
     )
     assert.equal(store.listDonations()[0]?.name, 'Legacy donation')
     assert.equal(JSON.parse(await Deno.readTextFile(dataFile)).donations[0].name, 'Legacy donation')
+  } finally {
+    await Deno.remove(directory, { recursive: true })
+  }
+})
+
+Deno.test('readers only observe mutations after persistence commits', async () => {
+  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
+  try {
+    const store = await Store.load(join(directory, 'costs.json'))
+    const pending = store.add(costInput())
+    await Promise.resolve()
+
+    assert.equal(store.list().length, 0)
+    await pending
+    assert.equal(store.list().length, 1)
   } finally {
     await Deno.remove(directory, { recursive: true })
   }

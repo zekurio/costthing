@@ -1,8 +1,15 @@
 <script lang="ts">
-  import { Check, HandHeart, Pencil, Scissors, X } from 'lucide-svelte'
-  import EntryForm from './EntryForm.svelte'
+  import Check from 'lucide-svelte/icons/check'
+  import HandHeart from 'lucide-svelte/icons/hand-heart'
+  import Pencil from 'lucide-svelte/icons/pencil'
+  import Scissors from 'lucide-svelte/icons/scissors'
+  import X from 'lucide-svelte/icons/x'
+  import type EntryFormComponent from './EntryForm.svelte'
+  import ConfirmDialog from './ConfirmDialog.svelte'
   import Select from './Select.svelte'
-  import { api } from '../lib/api.ts'
+  import { api, ApiError } from '../lib/api.ts'
+  import type { ConfirmAction, ConfirmDialogState } from '../lib/dialog.ts'
+  import { costInput, donationInput } from '../lib/entries.ts'
   import { costIcon } from '../lib/icons.ts'
   import {
     artLabel,
@@ -67,6 +74,22 @@
 
   // 'submit' = non-admin reporting a donation for themselves (pending until confirmed)
   let editing = $state<Entry | 'new' | 'submit' | null>(null)
+  let EntryForm = $state<typeof EntryFormComponent | null>(null)
+  let operationError = $state('')
+  let reloadNeeded = $state(false)
+
+  async function openEditor(next: NonNullable<typeof editing>) {
+    operationError = ''
+    reloadNeeded = false
+    editing = next
+    try {
+      EntryForm ??= (await import('./EntryForm.svelte')).default
+    } catch {
+      editing = null
+      operationError = 'Editor konnte nach einer Aktualisierung nicht geladen werden.'
+      reloadNeeded = true
+    }
+  }
 
   const pendingCount = $derived(donations.filter((d) => d.status === 'pending').length)
 
@@ -140,15 +163,15 @@
 
   // ---- confirm dialog ----
 
-  interface ConfirmAction {
-    label: string
-    kind: 'primary' | 'danger' | 'ghost'
-    run: () => void
-  }
+  let confirmDialog = $state<ConfirmDialogState | null>(null)
 
-  let confirmDialog = $state<{ title: string; body: string; actions: ConfirmAction[] } | null>(
-    null,
-  )
+  function reportOperationError(err: unknown) {
+    reloadNeeded = false
+    onadminerror(err)
+    if (!(err instanceof ApiError && (err.status === 401 || err.status === 403))) {
+      operationError = err instanceof Error ? err.message : 'Aktion fehlgeschlagen.'
+    }
+  }
 
   // ---- cost CRUD ----
 
@@ -208,15 +231,14 @@
 
   async function doCancel(point: SummaryPoint) {
     if (!admin) return
-    const { monthlyCents: _m, amortizationElapsedMonths: _a, ...input } = point
     try {
       await api.update(point.id, {
-        ...input,
+        ...costInput(point),
         endsOn: new Date().toISOString().slice(0, 10),
       })
       await onchanged()
     } catch (err) {
-      onadminerror(err)
+      reportOperationError(err)
     }
   }
 
@@ -226,7 +248,7 @@
       await api.remove(point.id)
       await onchanged()
     } catch (err) {
-      onadminerror(err)
+      reportOperationError(err)
     }
   }
 
@@ -256,7 +278,7 @@
       await api.confirmDonation(donation.id)
       await onchanged()
     } catch (err) {
-      onadminerror(err)
+      reportOperationError(err)
     }
   }
 
@@ -302,12 +324,12 @@
     if (!admin) return
     try {
       await api.updateDonation(donation.id, {
-        ...donation,
+        ...donationInput(donation),
         endsOn: new Date().toISOString().slice(0, 10),
       })
       await onchanged()
     } catch (err) {
-      onadminerror(err)
+      reportOperationError(err)
     }
   }
 
@@ -317,19 +339,11 @@
       await api.removeDonation(donation.id)
       await onchanged()
     } catch (err) {
-      onadminerror(err)
+      reportOperationError(err)
     }
   }
 
 </script>
-
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key !== 'Escape') return
-    if (confirmDialog) confirmDialog = null
-    else if (editing) editing = null
-  }}
-/>
 
 <section class="entries">
   <div class="section-head">
@@ -350,21 +364,51 @@
         </span>
       {/if}
       {#if admin}
-        <button class="add-entry" onclick={() => (editing = 'new')}>+ Eintrag hinzufügen</button>
+        <button class="add-entry" onclick={() => void openEditor('new')}>+ Eintrag hinzufügen</button>
       {:else}
-        <button class="add-entry" onclick={() => (editing = 'submit')}>+ Spende melden</button>
+        <button class="add-entry" onclick={() => void openEditor('submit')}>+ Spende melden</button>
       {/if}
     </div>
   </div>
 
+  {#if operationError}
+    <div class="operation-error" role="alert">
+      <span>{operationError}</span>
+      {#if reloadNeeded}
+        <button class="reload" onclick={() => location.reload()}>neu laden</button>
+      {/if}
+      <button aria-label="Fehlermeldung schließen" onclick={() => (operationError = '')}>×</button>
+    </div>
+  {/if}
+
   <div class="filters">
-    <input class="search" type="search" bind:value={query} placeholder="Einträge suchen…" />
+    <input
+      class="search"
+      type="search"
+      bind:value={query}
+      placeholder="Einträge suchen…"
+      aria-label="Einträge suchen"
+    />
     <div class="type-filter" role="group" aria-label="Typ filtern">
-      <button class:active={filterType === 'all'} onclick={() => (filterType = 'all')}>Alle</button>
-      <button class:active={filterType === 'costs'} onclick={() => (filterType = 'costs')}>
+      <button
+        class:active={filterType === 'all'}
+        aria-pressed={filterType === 'all'}
+        onclick={() => (filterType = 'all')}
+      >
+        Alle
+      </button>
+      <button
+        class:active={filterType === 'costs'}
+        aria-pressed={filterType === 'costs'}
+        onclick={() => (filterType = 'costs')}
+      >
         Kosten
       </button>
-      <button class:active={filterType === 'donations'} onclick={() => (filterType = 'donations')}>
+      <button
+        class:active={filterType === 'donations'}
+        aria-pressed={filterType === 'donations'}
+        onclick={() => (filterType = 'donations')}
+      >
         Spenden
       </button>
     </div>
@@ -373,9 +417,10 @@
       options={categoryOptions}
       disabled={filterType === 'donations'}
       title={filterType === 'donations' ? 'Kategorien gelten nur für Kosten' : ''}
+      ariaLabel="Kategorie filtern"
     />
-    <Select bind:value={filterCadence} options={[...cadenceOptions]} />
-    <Select bind:value={sortBy} options={[...sortOptions]} />
+    <Select bind:value={filterCadence} options={[...cadenceOptions]} ariaLabel="Rhythmus filtern" />
+    <Select bind:value={sortBy} options={[...sortOptions]} ariaLabel="Einträge sortieren" />
   </div>
 
   <div class="table-head table-grid" class:admin>
@@ -428,14 +473,27 @@
           {#if admin}
             <span class="cell row-admin">
               {#if !p.endsOn}
-                <button onclick={() => askCancel(p)} title="kündigen (Ende = heute)">
+                <button
+                  onclick={() => askCancel(p)}
+                  title="kündigen (Ende = heute)"
+                  aria-label={`${p.name} kündigen`}
+                >
                   <Scissors size={15} />
                 </button>
               {/if}
-              <button onclick={() => (editing = { kind: 'cost', cost: p })} title="bearbeiten">
+              <button
+                onclick={() => void openEditor({ kind: 'cost', cost: p })}
+                title="bearbeiten"
+                aria-label={`${p.name} bearbeiten`}
+              >
                 <Pencil size={15} />
               </button>
-              <button class="danger" onclick={() => askRemove(p)} title="löschen">
+              <button
+                class="danger"
+                onclick={() => askRemove(p)}
+                title="löschen"
+                aria-label={`${p.name} löschen`}
+              >
                 <X size={16} />
               </button>
             </span>
@@ -484,19 +542,37 @@
           {#if admin}
             <span class="cell row-admin">
               {#if d.status === 'pending'}
-                <button class="confirm" onclick={() => confirmDonation(d)} title="Spende bestätigen">
+                <button
+                  class="confirm"
+                  onclick={() => confirmDonation(d)}
+                  title="Spende bestätigen"
+                  aria-label={`Spende von ${d.name} bestätigen`}
+                >
                   <Check size={16} />
                 </button>
               {/if}
               {#if d.cadence !== 'one_time' && !d.endsOn}
-                <button onclick={() => askCancelDonation(d)} title="beenden (Ende = heute)">
+                <button
+                  onclick={() => askCancelDonation(d)}
+                  title="beenden (Ende = heute)"
+                  aria-label={`Spende von ${d.name} beenden`}
+                >
                   <Scissors size={15} />
                 </button>
               {/if}
-              <button onclick={() => (editing = { kind: 'donation', donation: d })} title="bearbeiten">
+              <button
+                onclick={() => void openEditor({ kind: 'donation', donation: d })}
+                title="bearbeiten"
+                aria-label={`Spende von ${d.name} bearbeiten`}
+              >
                 <Pencil size={15} />
               </button>
-              <button class="danger" onclick={() => askRemoveDonation(d)} title="löschen">
+              <button
+                class="danger"
+                onclick={() => askRemoveDonation(d)}
+                title="löschen"
+                aria-label={`Spende von ${d.name} löschen`}
+              >
                 <X size={16} />
               </button>
             </span>
@@ -509,7 +585,7 @@
   </ul>
 </section>
 
-{#if editing}
+{#if editing && EntryForm}
   <EntryForm
     initial={editing === 'new' || editing === 'submit'
       ? null
@@ -529,29 +605,12 @@
 {/if}
 
 {#if confirmDialog}
-  <div
-    class="overlay"
-    role="presentation"
-    onclick={(e) => e.target === e.currentTarget && (confirmDialog = null)}
-  >
-    <div class="admin-box confirm-box">
-      <h2>{confirmDialog.title}</h2>
-      <p class="confirm-body">{confirmDialog.body}</p>
-      <div class="actions">
-        {#each confirmDialog.actions as action (action.label)}
-          <button
-            class={action.kind === 'danger' ? 'danger-solid' : action.kind === 'ghost' ? 'muted-btn' : 'primary'}
-            onclick={() => {
-              confirmDialog = null
-              action.run()
-            }}
-          >
-            {action.label}
-          </button>
-        {/each}
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title={confirmDialog.title}
+    body={confirmDialog.body}
+    actions={confirmDialog.actions}
+    onclose={() => (confirmDialog = null)}
+  />
 {/if}
 
 <style>
@@ -608,8 +667,8 @@
   .pending-count {
     font-size: 12px;
     font-weight: 600;
-    color: var(--warn-strong, #a16207);
-    background: color-mix(in srgb, var(--warn, #eab308) 16%, transparent);
+    color: var(--warn-strong);
+    background: color-mix(in srgb, var(--warn) 16%, transparent);
     border-radius: 99px;
     padding: 4px 12px;
   }
@@ -744,8 +803,8 @@
   }
 
   .pending-tile {
-    background: color-mix(in srgb, var(--warn, #eab308) 18%, transparent);
-    color: var(--warn-strong, #a16207);
+    background: color-mix(in srgb, var(--warn) 18%, transparent);
+    color: var(--warn-strong);
   }
 
   .pending-badge {
@@ -753,8 +812,8 @@
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--warn-strong, #a16207);
-    background: color-mix(in srgb, var(--warn, #eab308) 16%, transparent);
+    color: var(--warn-strong);
+    background: color-mix(in srgb, var(--warn) 16%, transparent);
     border-radius: 99px;
     padding: 2px 8px;
     margin-left: 6px;
@@ -933,82 +992,32 @@
     }
   }
 
-  /* ---- confirm dialog ---- */
-
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgb(40 50 60 / 0.4);
-    display: grid;
-    place-items: center;
-    padding: 20px;
-    z-index: 10;
-  }
-
-  .admin-box {
-    width: min(400px, 100%);
-    background: var(--surface);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
-    padding: 24px;
+  .operation-error {
     display: flex;
-    flex-direction: column;
-    gap: 14px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 9px 12px;
+    color: var(--danger-strong);
+    background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+    border-radius: 10px;
+    font-size: 13px;
   }
 
-  .admin-box h2 {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
+  .operation-error button {
+    flex-shrink: 0;
+    color: inherit;
+    line-height: 1;
   }
 
-  .confirm-body {
-    margin: 0;
-    color: var(--muted);
-    font-size: 14px;
-  }
-
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
-
-  .primary {
-    background: var(--accent);
-    color: var(--on-accent);
+  .operation-error .reload {
+    margin-left: auto;
+    font-size: 13px;
     font-weight: 600;
-    border-radius: 99px;
-    padding: 8px 18px;
-    transition: background 120ms ease;
   }
 
-  .primary:hover {
-    background: var(--accent-strong);
-  }
-
-  .muted-btn {
-    color: var(--muted);
-    border-radius: 99px;
-    padding: 8px 14px;
-  }
-
-  .muted-btn:hover {
-    background: var(--surface-2);
-    color: var(--ink);
-  }
-
-  .danger-solid {
-    background: var(--danger);
-    color: var(--on-accent);
-    font-weight: 600;
-    border-radius: 99px;
-    padding: 8px 18px;
-    transition: background 120ms ease;
-  }
-
-  .danger-solid:hover {
-    background: var(--danger-strong);
+  .operation-error button:last-child {
+    font-size: 18px;
   }
 </style>

@@ -131,6 +131,7 @@ export class Jellyfin {
   #now: () => number
   #cache = new Map<string, { user: JellyfinUser; expires: number }>()
   #pendingUsers = new Map<string, Promise<JellyfinUser | null>>()
+  #revokedTokens = new Set<string>()
 
   constructor(baseUrl: string, options: JellyfinOptions = {}) {
     this.#base = baseUrl.replace(/\/+$/, '')
@@ -172,12 +173,14 @@ export class Jellyfin {
     if (!res.ok) await this.#throwForStatus(res, 'authentication')
 
     const session = await this.#readJson(res, 'authentication', parseAuthentication)
+    this.#revokedTokens.delete(session.token)
     this.#cacheUser(session.token, session.user)
     return session
   }
 
   /** Resolves a session token to its user; null only if the token is no longer valid. */
   user(token: string): Promise<JellyfinUser | null> {
+    if (this.#revokedTokens.has(token)) return Promise.resolve(null)
     const now = this.#now()
     const hit = this.#cache.get(token)
     if (hit && hit.expires > now) return Promise.resolve(hit.user)
@@ -210,6 +213,13 @@ export class Jellyfin {
   /** Invalidates the session on the Jellyfin side (best effort). */
   async logout(token: string): Promise<void> {
     this.#cache.delete(token)
+    this.#pendingUsers.delete(token)
+    this.#revokedTokens.add(token)
+    while (this.#revokedTokens.size > this.#maxCacheEntries) {
+      const oldest = this.#revokedTokens.values().next().value
+      if (oldest === undefined) break
+      this.#revokedTokens.delete(oldest)
+    }
     try {
       const res = await this.#request('/Sessions/Logout', 'logout', {
         method: 'POST',
@@ -235,7 +245,8 @@ export class Jellyfin {
       return new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } })
     }
     if (!res.ok) await this.#throwForStatus(res, 'avatar')
-    return new Response(res.body, {
+    const body = await this.#readBody(res, 'avatar', () => res.arrayBuffer())
+    return new Response(body, {
       headers: {
         'content-type': res.headers.get('content-type') ?? 'image/jpeg',
         'cache-control': 'no-store',
@@ -255,6 +266,7 @@ export class Jellyfin {
     if (!res.ok) await this.#throwForStatus(res, 'session validation')
 
     const user = await this.#readJson(res, 'session validation', parseUser)
+    if (this.#revokedTokens.has(token)) return null
     this.#cacheUser(token, user)
     return user
   }
@@ -312,12 +324,33 @@ export class Jellyfin {
     parse: (value: unknown) => T,
   ): Promise<T> {
     try {
-      return parse(await response.json())
+      const value = await this.#readBody(response, operation, () => response.json())
+      return parse(value)
     } catch (cause) {
+      if (cause instanceof JellyfinError) throw cause
       throw new JellyfinError(`jellyfin ${operation} returned a malformed response`, {
         kind: 'malformed-response',
         cause,
       })
+    }
+  }
+
+  async #readBody<T>(
+    response: Response,
+    operation: string,
+    read: () => Promise<T>,
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        void response.body?.cancel().catch(() => {})
+        reject(new JellyfinError(`jellyfin ${operation} timed out`, { kind: 'timeout' }))
+      }, this.#timeoutMs)
+    })
+    try {
+      return await Promise.race([read(), timeout])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
     }
   }
 

@@ -6,7 +6,9 @@ server.
 
 Login is Jellyfin's own: anyone with an account sees the totals, the timeline and the full item
 list, while adding, editing, cancelling and deleting is reserved for Jellyfin administrators.
-Nothing but Jellyfin decides who may write. The UI is in German.
+Nothing but Jellyfin decides who may write. Each browser gets its own Jellyfin device identity, so
+logging in elsewhere does not displace an existing session; transient Jellyfin outages show a retry
+state instead of forgetting the session. The UI is in German.
 
 ### Cost model
 
@@ -14,8 +16,9 @@ Every cost point has a cadence:
 
 - `monthly` / `yearly` — face value; yearly is divided by 12 for monthly figures.
 - `custom` — every `<intervalCount>` `<intervalUnit>` (days/weeks/months/years), prorated per month.
-- `one_time` — counts only in its start month, or, with `amortizationMonths`, is spread evenly over
-  that many months from `startsOn`.
+- `one_time` — counts only in its start month, or, with `amortizationMonths`, is spread over exactly
+  that many calendar months starting with the month containing `startsOn`. Remainder cents are
+  distributed without losing money.
 
 `endsOn` ("kündigen" in the UI) keeps a point counting through that month and drops it afterwards,
 so historic months stay intact in the timeline. Deleting a point instead removes it retroactively.
@@ -40,8 +43,9 @@ whenever an admin loads the user list.
 ### Storage
 
 A single JSON file, in exactly the import/export format — an export can be dropped back in as the
-data file. Each write keeps the previous state as `costs.json.bak`. Imports are validated before
-they replace anything and need an explicit confirmation in the UI.
+data file. Mutations are serialized, validated, written atomically and rolled back in memory if
+persistence fails. Each write keeps the previous state as `costs.json.bak`. Imports are validated
+before they replace anything and need an explicit confirmation in the UI.
 
 ### Configuration
 

@@ -2,7 +2,6 @@
   "version": "5",
   "specifiers": {
     "npm:@fontsource-variable/google-sans@^5.3.0": "5.3.0",
-    "npm:@fontsource/google-sans-code@^5.3.0": "5.3.0",
     "npm:@sveltejs/vite-plugin-svelte@6.2.4": "6.2.4_svelte@5.56.4_vite@7.3.6",
     "npm:@tsconfig/svelte@5.0.8": "5.0.8",
     "npm:elysia@1.4.29": "1.4.29_@sinclair+typebox@0.34.52_exact-mirror@0.2.7__@sinclair+typebox@0.34.52_file-type@22.0.1_openapi-types@12.1.3_typescript@5.9.3",
@@ -148,9 +147,6 @@
     },
     "@fontsource-variable/google-sans@5.3.0": {
       "integrity": "sha512-VEwy6YigBfQ/F2PwkiZtQxA35+X5V1BpuNT15/o3dXTymbeT6YZNsy356VfqasyLJLRWoUfSrJNzbdA8RF+S+w=="
-    },
-    "@fontsource/google-sans-code@5.3.0": {
-      "integrity": "sha512-z1IDzMNX66oWak+RSEwk84DxsglnEuLDERpMnzzuatLTewbFeB/HM/aKXOkpXMKGDT3tm+TQZaX59q8g6+BqQw=="
     },
     "@jridgewell/gen-mapping@0.3.13": {
       "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
@@ -682,7 +678,6 @@
   "workspace": {
     "dependencies": [
       "npm:@fontsource-variable/google-sans@^5.3.0",
-      "npm:@fontsource/google-sans-code@^5.3.0",
       "npm:@sveltejs/vite-plugin-svelte@6.2.4",
       "npm:@tsconfig/svelte@5.0.8",
       "npm:elysia@1.4.29",
