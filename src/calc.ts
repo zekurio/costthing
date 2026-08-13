@@ -41,6 +41,19 @@ function allocatedCents(totalCents: number, buckets: number, index: number): num
 }
 
 /**
+ * Amount in effect for a calendar month (YYYY-MM): the latest change at or
+ * before it wins, otherwise the base amount. priceChanges is stored sorted.
+ */
+function amountForMonth(p: CostPoint, month: string): number {
+  let amount = p.costCents
+  for (const change of p.priceChanges) {
+    if (change.startsOn.slice(0, 7) > month) break
+    amount = change.costCents
+  }
+  return amount
+}
+
+/**
  * Effective cost for the calendar month containing `now`, in cents.
  *
  * The day within the month is intentionally ignored so timeline sampling on
@@ -51,21 +64,22 @@ export function monthlyCents(p: CostPoint, now: Date = new Date()): number {
   const startMonth = p.startsOn.slice(0, 7)
   const endMonth = p.endsOn?.slice(0, 7) ?? null
   if (month < startMonth || (endMonth && month > endMonth)) return 0
+  const amount = amountForMonth(p, month)
 
   switch (p.cadence) {
     case 'monthly':
-      return p.costCents
+      return amount
     case 'yearly':
-      return allocatedCents(p.costCents, 12, monthOffset(startMonth, month) % 12)
+      return allocatedCents(amount, 12, monthOffset(startMonth, month) % 12)
     case 'custom': {
       const months = intervalMonths(p)
-      return months > 0 ? Math.round(p.costCents / months) : 0
+      return months > 0 ? Math.round(amount / months) : 0
     }
     case 'one_time': {
       const duration = amortizationDuration(p)
-      if (duration === null) return month === startMonth ? p.costCents : 0
+      if (duration === null) return month === startMonth ? amount : 0
       const offset = monthOffset(startMonth, month)
-      return offset < duration ? allocatedCents(p.costCents, duration, offset) : 0
+      return offset < duration ? allocatedCents(amount, duration, offset) : 0
     }
   }
 }
@@ -74,8 +88,9 @@ export function monthlyCents(p: CostPoint, now: Date = new Date()): number {
 export function annualizedCents(p: CostPoint, now: Date = new Date()): number {
   const current = monthlyCents(p, now)
   if (current === 0) return 0
-  if (p.cadence === 'monthly') return p.costCents * 12
-  if (p.cadence === 'yearly') return p.costCents
+  const month = utcMonth(now)
+  if (p.cadence === 'monthly') return amountForMonth(p, month) * 12
+  if (p.cadence === 'yearly') return amountForMonth(p, month)
   return current * 12
 }
 

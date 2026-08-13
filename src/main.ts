@@ -23,6 +23,15 @@ const costBody = t.Object({
   category: t.String({ minLength: 1, maxLength: 100 }),
   icon: t.Optional(t.Nullable(t.String({ minLength: 1, maxLength: 100 }))),
   costCents: t.Integer({ minimum: 0 }),
+  /** later amounts keyed by their first month — absent = price never changes */
+  priceChanges: t.Optional(
+    t.Array(
+      t.Object({
+        startsOn: t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
+        costCents: t.Integer({ minimum: 0 }),
+      }),
+    ),
+  ),
   cadence: t.Union([
     t.Literal('one_time'),
     t.Literal('monthly'),
@@ -256,13 +265,17 @@ const app = new Elysia()
               )
               .post('/api/costs', async ({ body, set }) => {
                 const { icon, ...input } = body
-                const result = await storeCall(() => store.add(input, icon))
+                const result = await storeCall(() =>
+                  store.add({ priceChanges: [], ...input }, icon)
+                )
                 if (!(result instanceof Response)) set.status = 201
                 return result
               }, { body: costBody })
               .put('/api/costs/:id', async ({ params, body, set }) => {
                 const { icon, ...input } = body
-                const updated = await storeCall(() => store.update(Number(params.id), input, icon))
+                const updated = await storeCall(() =>
+                  store.update(Number(params.id), { priceChanges: [], ...input }, icon)
+                )
                 if (updated instanceof Response) return updated
                 if (!updated) {
                   set.status = 404

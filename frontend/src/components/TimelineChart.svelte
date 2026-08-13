@@ -166,7 +166,7 @@
       <span class="metric-label">Spenden</span>
       <strong>{cents(fmt, coverage.donatedCents)}</strong>
       <span class="metric-detail">
-        {donPct !== null ? `${donPct} % gedeckt` : 'keine Kosten'}
+        {donPct !== null ? `${donPct} % gedeckt` : 'keine Kosten'} im {monthLabel(coverage.month)}
       </span>
     </div>
     <div class="metric-card" class:positive={coverage.balanceCents > 0} class:negative={coverage.balanceCents < 0}>

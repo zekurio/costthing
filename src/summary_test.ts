@@ -8,6 +8,7 @@ function cost(overrides: Partial<CostPoint> = {}): CostPoint {
     name: 'Server',
     category: 'Hosting',
     costCents: 1200,
+    priceChanges: [],
     cadence: 'monthly',
     startsOn: '2026-01-01',
     endsOn: null,
@@ -32,6 +33,23 @@ function donation(overrides: Partial<Donation> = {}): Donation {
     ...overrides,
   }
 }
+
+Deno.test('timeline follows price changes', () => {
+  const timeline = buildTimeline(
+    [
+      cost({
+        startsOn: '2026-01-01',
+        priceChanges: [{ startsOn: '2026-04-01', costCents: 2400 }],
+      }),
+    ],
+    [],
+    new Date('2026-07-20T12:00:00Z'),
+  )
+
+  assert.equal(timeline.find((entry) => entry.month === '2026-03')?.totalCents, 1200)
+  assert.equal(timeline.find((entry) => entry.month === '2026-04')?.totalCents, 2400)
+  assert.equal(timeline.at(-1)?.totalCents, 2400)
+})
 
 Deno.test('timeline includes current month before future-only entries', () => {
   const timeline = buildTimeline(

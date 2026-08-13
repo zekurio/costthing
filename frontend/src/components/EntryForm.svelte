@@ -11,6 +11,7 @@
     DonationInput,
     IntervalUnit,
     KnownUser,
+    PriceChange,
     SummaryPoint,
   } from '../../../shared/types.ts'
 
@@ -92,6 +93,29 @@
   let amortizationMonths = $state(initialCost?.amortizationMonths ?? 60)
   let intervalCount = $state(initialCost?.intervalCount ?? 3)
   let intervalUnit = $state<IntervalUnit>(initialCost?.intervalUnit ?? 'months')
+
+  // later amounts over time; the base Betrag above counts from Beginn
+  interface PriceChangeRow {
+    id: number
+    startsOn: string
+    amount: string
+  }
+  let nextRowId = 0
+  let priceChanges = $state<PriceChangeRow[]>(
+    initialCost?.priceChanges.map((change) => ({
+      id: nextRowId++,
+      startsOn: change.startsOn,
+      amount: (change.costCents / 100).toFixed(2),
+    })) ?? [],
+  )
+
+  function addPriceChange() {
+    priceChanges.push({ id: nextRowId++, startsOn: '', amount: '' })
+  }
+
+  function removePriceChange(id: number) {
+    priceChanges = priceChanges.filter((row) => row.id !== id)
+  }
 
   // donation-only
   let donationCadence = $state<DonationCadence>(initialDonation?.cadence ?? 'one_time')
@@ -177,6 +201,26 @@
         error = 'Das Intervall muss mindestens 1 sein.'
         return
       }
+      if (cadence !== 'one_time') {
+        const seenMonths = new Set<string>()
+        for (const row of priceChanges) {
+          const rowCents = parseAmount(row.amount)
+          if (rowCents === null || !row.startsOn) {
+            error = 'Jede Preisänderung braucht ein Datum und einen Betrag, z. B. 10,40.'
+            return
+          }
+          const changeMonth = row.startsOn.slice(0, 7)
+          if (changeMonth <= startsOn.slice(0, 7)) {
+            error = 'Preisänderungen müssen in einem späteren Monat als der Beginn liegen.'
+            return
+          }
+          if (seenMonths.has(changeMonth)) {
+            error = 'Pro Monat ist nur eine Preisänderung möglich.'
+            return
+          }
+          seenMonths.add(changeMonth)
+        }
+      }
     } else if (donationEndsOn && donationEndsOn < receivedOn) {
       error = 'Ende liegt vor dem Beginn.'
       return
@@ -185,11 +229,19 @@
     error = ''
     try {
       if (kind === 'cost') {
+        const parsedChanges: PriceChange[] = cadence === 'one_time'
+          ? []
+          : priceChanges.map((row) => ({
+            startsOn: row.startsOn,
+            costCents: parseAmount(row.amount) ?? 0,
+          }))
+        parsedChanges.sort((a, b) => a.startsOn.localeCompare(b.startsOn))
         await onsaveCost({
           name: name.trim(),
           category: category.trim(),
           icon,
           costCents: amountCents,
+          priceChanges: parsedChanges,
           cadence,
           startsOn,
           endsOn: endsOn || null,
@@ -347,6 +399,40 @@
         <span class="help">Gekündigt: zählt noch bis einschließlich dieses Monats, der Verlauf bleibt erhalten.</span>
       {/if}
 
+      {#if cadence !== 'one_time'}
+        <div class="price-changes">
+          <span class="help">
+            Preisänderungen (optional) — z. B. nach einem Anbieterwechsel: ab dem gewählten Monat
+            gilt der neue Betrag, bis zur nächsten Änderung oder zum Ende. Der Betrag oben gilt ab
+            Beginn.
+          </span>
+          {#each priceChanges as change (change.id)}
+            <div class="change-row">
+              <label>
+                Gilt ab
+                <input type="date" bind:value={change.startsOn} required />
+              </label>
+              <label>
+                Neuer Betrag
+                <input bind:value={change.amount} required inputmode="decimal" placeholder="12,00" />
+              </label>
+              <button
+                type="button"
+                class="change-remove"
+                aria-label="Preisänderung entfernen"
+                title="Preisänderung entfernen"
+                onclick={() => removePriceChange(change.id)}
+              >×</button>
+            </div>
+          {/each}
+          <div>
+            <button type="button" class="btn ghost change-add" onclick={addPriceChange}>
+              + Preisänderung
+            </button>
+          </div>
+        </div>
+      {/if}
+
       {#if cadence === 'one_time'}
         <label>
           Abschreibung über (Monate)
@@ -493,6 +579,41 @@
   .help {
     font-size: 12px;
     color: var(--muted);
+  }
+
+  .price-changes {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .change-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+  }
+
+  .change-remove {
+    width: 37px;
+    height: 37px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--muted);
+    font-size: 16px;
+    transition: background 120ms ease, color 120ms ease;
+  }
+
+  .change-remove:hover {
+    color: var(--danger-strong);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+  }
+
+  .change-add {
+    padding: 7px 14px;
+    font-size: 13px;
   }
 
   .cat-chips-wrap {
