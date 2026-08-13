@@ -4,8 +4,8 @@
   (`src/`), a Svelte 5 + Vite SPA (`frontend/`), and the wire contract both sides import from
   `shared/types.ts`. State is one JSON file on disk — there is no database.
 - `main` is the only long-lived branch; use `main` or `origin/main` for diffs.
-- Deno 2 is the whole toolchain (`denoland/deno:2.4.2` in the Dockerfile). Never use npm, pnpm, yarn
-  or Bun; `nodeModulesDir: auto` lets Deno manage `node_modules` from `deno.json` imports.
+- Deno 2 is the whole toolchain. Never use npm, pnpm, yarn or Bun; `nodeModulesDir: auto` lets Deno
+  manage `node_modules` from `deno.json` imports.
 - `deno task dev` runs the API (`:8080`) and the Vite dev server together; `deno task start` serves
   the built frontend and the API from one process; `deno task frontend:build` writes
   `frontend/dist`.

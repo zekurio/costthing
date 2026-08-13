@@ -3,11 +3,24 @@ export type DonationCadence = 'one_time' | 'monthly' | 'yearly'
 export type DonationStatus = 'confirmed' | 'pending'
 export type IntervalUnit = 'days' | 'weeks' | 'months' | 'years'
 
+export interface PriceChange {
+  /** ISO date, YYYY-MM-DD — the new amount counts for the whole calendar month of this date */
+  startsOn: string
+  costCents: number
+}
+
 export interface CostPoint {
   id: number
   name: string
   category: string
+  /** amount that counts from startsOn until the first price change */
   costCents: number
+  /**
+   * Later amounts, sorted by startsOn with unique calendar months: each counts
+   * from its month until the next change (or endsOn). Empty = the price never
+   * changes. Not valid for one_time costs — a single payment has no history.
+   */
+  priceChanges: PriceChange[]
   cadence: Cadence
   /** ISO date, YYYY-MM-DD */
   startsOn: string

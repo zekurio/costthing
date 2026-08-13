@@ -6,6 +6,7 @@ import type {
   Donation,
   DonationInput,
   KnownUser,
+  PriceChange,
 } from '../shared/types.ts'
 
 const MAX_AMORTIZATION_MONTHS = 1200
@@ -493,6 +494,7 @@ function normalizeCostFile(value: unknown, strict = true): CostFile {
         'name',
         'category',
         'costCents',
+        'priceChanges',
         'cadence',
         'startsOn',
         'endsOn',
@@ -641,10 +643,25 @@ function normalizeCostInput(value: unknown, path: string, strict = true): CostIn
     throw new StoreValidationError(`${path}.amortizationMonths is only valid for one_time cadence`)
   }
 
+  const priceChanges = normalizePriceChanges(point.priceChanges, `${path}.priceChanges`, strict)
+
+  if (strict && cadence === 'one_time' && priceChanges.length > 0) {
+    throw new StoreValidationError(`${path}.priceChanges is not valid for one_time cadence`)
+  }
+  if (
+    strict && priceChanges.length > 0 &&
+    priceChanges[0]!.startsOn.slice(0, 7) <= startsOn.slice(0, 7)
+  ) {
+    throw new StoreValidationError(
+      `${path}.priceChanges must start in a later month than ${path}.startsOn`,
+    )
+  }
+
   return {
     name,
     category,
     costCents,
+    priceChanges,
     cadence,
     startsOn,
     endsOn,
@@ -652,6 +669,36 @@ function normalizeCostInput(value: unknown, path: string, strict = true): CostIn
     intervalCount,
     intervalUnit: unit,
   }
+}
+
+/**
+ * Stored sorted with unique calendar months so calc can scan changes in
+ * order; input order is normalized away instead of rejected, but two changes
+ * in the same month are ambiguous and always an error.
+ */
+function normalizePriceChanges(value: unknown, path: string, strict: boolean): PriceChange[] {
+  if (value === undefined || value === null) return []
+  const changes = array(value, path).map((entry, index): PriceChange => {
+    const changePath = `${path}[${index}]`
+    const change = record(entry, changePath)
+    if (strict) knownKeys(change, changePath, ['startsOn', 'costCents'])
+    return {
+      startsOn: date(change.startsOn, `${changePath}.startsOn`),
+      costCents: integer(
+        change.costCents,
+        `${changePath}.costCents`,
+        0,
+        strict ? MAX_COST_CENTS : Number.MAX_SAFE_INTEGER,
+      ),
+    }
+  })
+  changes.sort((a, b) => a.startsOn.localeCompare(b.startsOn))
+  for (let index = 1; index < changes.length; index++) {
+    if (changes[index]!.startsOn.slice(0, 7) === changes[index - 1]!.startsOn.slice(0, 7)) {
+      throw new StoreValidationError(`${path} must not repeat a calendar month`)
+    }
+  }
+  return changes
 }
 
 function normalizeDonationInput(value: unknown, path: string, strict = true): DonationInput {

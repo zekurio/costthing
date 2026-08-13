@@ -11,6 +11,7 @@ export function costInput(point: SummaryPoint): CostSaveInput {
     name: point.name,
     category: point.category,
     costCents: point.costCents,
+    priceChanges: point.priceChanges.map((change) => ({ ...change })),
     cadence: point.cadence,
     startsOn: point.startsOn,
     endsOn: point.endsOn,

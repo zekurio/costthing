@@ -58,19 +58,9 @@ before they replace anything and need an explicit confirmation in the UI.
 
 ### Deployment
 
-Railway builds the repo's `Dockerfile` directly via `railway.toml`: create a service from this repo,
-add a **volume mounted at `/data`**, and set `JELLYFIN_URL`. The healthcheck is `/api/health` and an
-empty data file is created on first boot.
-
-Plain Docker works the same way:
-
-```sh
-docker build -t costthing .
-docker run -p 8080:8080 -v costthing-data:/data -e JELLYFIN_URL=http://jellyfin:8096 costthing
-```
-
-With Nix, `nix run github:zekurio/costthing` or `nix build` produce the same app; it stores data in
-`./data/costs.json` unless `DATA_FILE` says otherwise.
+With Nix, `nix run github:zekurio/costthing` or `nix build` produce the app; it stores data in
+`./data/costs.json` unless `DATA_FILE` says otherwise. Set `JELLYFIN_URL` to enable login. The
+healthcheck is `/api/health` and an empty data file is created on first boot.
 
 ### Development
 

@@ -25,6 +25,7 @@ function cost(overrides: Partial<CostPoint> = {}): CostPoint {
     name: 'Test',
     category: 'Infra',
     costCents: 12_000,
+    priceChanges: [],
     cadence: 'monthly',
     startsOn: '2026-07-24',
     endsOn: null,
@@ -49,6 +50,57 @@ function donation(overrides: Partial<Donation> = {}): Donation {
     ...overrides,
   }
 }
+
+Deno.test('price changes apply from their calendar month until the next change', () => {
+  const point = cost({
+    startsOn: '2026-01-15',
+    priceChanges: [
+      { startsOn: '2026-06-20', costCents: 9_000 },
+      { startsOn: '2027-01-01', costCents: 15_000 },
+    ],
+  })
+
+  assert.equal(monthlyCents(point, utcDate('2026-01-15')), 12_000)
+  assert.equal(monthlyCents(point, utcDate('2026-05-31')), 12_000)
+  // a mid-month change counts for its whole calendar month
+  assert.equal(monthlyCents(point, utcDate('2026-06-01')), 9_000)
+  assert.equal(monthlyCents(point, utcDate('2026-06-19')), 9_000)
+  assert.equal(monthlyCents(point, utcDate('2026-06-20')), 9_000)
+  assert.equal(monthlyCents(point, utcDate('2026-12-31')), 9_000)
+  assert.equal(monthlyCents(point, utcDate('2027-01-01')), 15_000)
+  assert.equal(annualizedCents(point, utcDate('2026-06-15')), 108_000)
+})
+
+Deno.test('yearly and custom costs follow price changes mid-cycle', () => {
+  const yearly = cost({
+    cadence: 'yearly',
+    startsOn: '2026-01-01',
+    priceChanges: [{ startsOn: '2026-07-01', costCents: 24_000 }],
+  })
+  assert.equal(monthlyCents(yearly, utcDate('2026-06-01')), 1_000)
+  assert.equal(monthlyCents(yearly, utcDate('2026-07-01')), 2_000)
+  assert.equal(annualizedCents(yearly, utcDate('2026-08-01')), 24_000)
+
+  const custom = cost({
+    cadence: 'custom',
+    intervalCount: 3,
+    intervalUnit: 'months',
+    startsOn: '2026-01-01',
+    priceChanges: [{ startsOn: '2026-07-01', costCents: 6_000 }],
+  })
+  assert.equal(monthlyCents(custom, utcDate('2026-06-01')), 4_000)
+  assert.equal(monthlyCents(custom, utcDate('2026-07-01')), 2_000)
+})
+
+Deno.test('price changes after the end month never count', () => {
+  const point = cost({
+    startsOn: '2026-01-01',
+    endsOn: '2026-06-30',
+    priceChanges: [{ startsOn: '2026-09-01', costCents: 5_000 }],
+  })
+  assert.equal(monthlyCents(point, utcDate('2026-06-30')), 12_000)
+  assert.equal(monthlyCents(point, utcDate('2026-09-01')), 0)
+})
 
 Deno.test('recurring costs use whole start and end calendar months', () => {
   const cases: Array<{ point: CostPoint; expected: number }> = [

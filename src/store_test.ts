@@ -8,6 +8,7 @@ function costInput(overrides: Partial<CostInput> = {}): CostInput {
     name: 'Server',
     category: 'Hardware',
     costCents: 1200,
+    priceChanges: [],
     cadence: 'monthly',
     startsOn: '2026-07-24',
     endsOn: null,
@@ -46,6 +47,70 @@ function exportData() {
     ],
   }
 }
+
+Deno.test('price changes are normalized, validated, and persist', async () => {
+  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
+  try {
+    const dataFile = join(directory, 'costs.json')
+    // legacy records predate the field and default to a never-changing price
+    const legacyPoint: Record<string, unknown> = { ...costInput({ name: 'Legacy' }), id: 1 }
+    delete legacyPoint.priceChanges
+    await Deno.writeTextFile(
+      dataFile,
+      JSON.stringify({ ...exportData(), costPoints: [legacyPoint] }),
+    )
+
+    const store = await Store.load(dataFile)
+    assert.deepEqual(store.list()[0]?.priceChanges, [])
+
+    // input order is normalized to chronological order
+    const added = await store.add(
+      costInput({
+        priceChanges: [
+          { startsOn: '2027-01-01', costCents: 1500 },
+          { startsOn: '2026-10-01', costCents: 900 },
+        ],
+      }),
+    )
+    assert.deepEqual(
+      added.priceChanges.map((change) => change.startsOn),
+      ['2026-10-01', '2027-01-01'],
+    )
+
+    await assert.rejects(
+      () =>
+        store.add(
+          costInput({
+            priceChanges: [
+              { startsOn: '2026-10-01', costCents: 900 },
+              { startsOn: '2026-10-15', costCents: 950 },
+            ],
+          }),
+        ),
+      /must not repeat a calendar month/,
+    )
+    await assert.rejects(
+      () =>
+        store.add(
+          costInput({
+            cadence: 'one_time',
+            priceChanges: [{ startsOn: '2026-10-01', costCents: 900 }],
+          }),
+        ),
+      /not valid for one_time cadence/,
+    )
+    await assert.rejects(
+      () => store.add(costInput({ priceChanges: [{ startsOn: '2026-07-01', costCents: 900 }] })),
+      /later month/,
+    )
+
+    const reloaded = await Store.load(dataFile)
+    const stored = reloaded.list().find((point) => point.id === added.id)
+    assert.deepEqual(stored?.priceChanges, added.priceChanges)
+  } finally {
+    await Deno.remove(directory, { recursive: true })
+  }
+})
 
 Deno.test('imports an export and normalizes legacy donations', async () => {
   const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
