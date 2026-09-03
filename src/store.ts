@@ -1,17 +1,32 @@
+import { Type } from '@sinclair/typebox'
 import { basename, dirname } from 'node:path'
-import type {
-  CostFile,
-  CostInput,
-  CostPoint,
-  Donation,
-  DonationInput,
-  KnownUser,
-  PriceChange,
+import {
+  type CostFile,
+  CostFileSchema,
+  type CostInput,
+  type CostPoint,
+  type Donation,
+  type DonationInput,
+  type KnownUser,
+  type PriceChange,
 } from '../shared/types.ts'
+import { decode, TypeBoxValidationError } from './validation.ts'
 
 const MAX_AMORTIZATION_MONTHS = 1200
 const MAX_INTERVAL_COUNT = 100_000
 const MAX_COST_CENTS = Math.floor(Number.MAX_SAFE_INTEGER / 12)
+
+// Legacy files omit newer collections, so TypeBox checks the migration envelope
+// before the normalizer fills defaults and enforces semantic invariants.
+const StoredFileEnvelopeSchema = Type.Object({
+  schemaVersion: Type.Unknown(),
+  currency: Type.String(),
+  exportedAt: Type.Optional(Type.Unknown()),
+  costPoints: Type.Array(Type.Unknown()),
+  donations: Type.Optional(Type.Array(Type.Unknown())),
+  knownUsers: Type.Optional(Type.Array(Type.Unknown())),
+  categoryIcons: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+}, { additionalProperties: true })
 
 export class StoreValidationError extends Error {
   override name = 'StoreValidationError'
@@ -454,6 +469,12 @@ export class Store {
 }
 
 function normalizeCostFile(value: unknown, strict = true): CostFile {
+  try {
+    decode(StoredFileEnvelopeSchema, value)
+  } catch (error) {
+    if (!(error instanceof TypeBoxValidationError)) throw error
+    throw new StoreValidationError(`invalid cost file: ${error.message}`, { cause: error })
+  }
   const root = record(value, 'root')
   if (strict) {
     knownKeys(root, 'root', [
@@ -573,8 +594,8 @@ function normalizeCostFile(value: unknown, strict = true): CostFile {
   uniqueIds(costPoints, 'costPoints')
   uniqueIds(donations, 'donations')
 
-  return {
-    schemaVersion: 1,
+  const normalized = {
+    schemaVersion: 1 as const,
     currency,
     exportedAt: root.exportedAt === undefined
       ? new Date().toISOString()
@@ -587,6 +608,14 @@ function normalizeCostFile(value: unknown, strict = true): CostFile {
     donations,
     knownUsers,
     categoryIcons,
+  }
+  try {
+    return decode(CostFileSchema, normalized)
+  } catch (error) {
+    if (!(error instanceof TypeBoxValidationError)) throw error
+    throw new StoreValidationError(`invalid normalized cost file: ${error.message}`, {
+      cause: error,
+    })
   }
 }
 
