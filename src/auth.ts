@@ -1,12 +1,29 @@
+import { Type } from '@sinclair/typebox'
+import type { JellyfinUser } from '../shared/types.ts'
+import { decode } from './validation.ts'
+
+export type { JellyfinUser } from '../shared/types.ts'
+
 /** Minimal Jellyfin auth client with bounded requests and a short-lived user cache. */
 
-export interface JellyfinUser {
-  id: string
-  name: string
-  isAdmin: boolean
-  /** primary image tag — null if the user has no avatar */
-  avatarTag: string | null
-}
+const JellyfinUserResponseSchema = Type.Object({
+  Id: Type.String({ minLength: 1 }),
+  Name: Type.String({ minLength: 1 }),
+  PrimaryImageTag: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  Policy: Type.Optional(Type.Union([
+    Type.Object({
+      IsAdministrator: Type.Optional(Type.Boolean()),
+    }, { additionalProperties: true }),
+    Type.Null(),
+  ])),
+}, { additionalProperties: true })
+
+const AuthenticationResponseSchema = Type.Object({
+  AccessToken: Type.String({ minLength: 1 }),
+  User: JellyfinUserResponseSchema,
+}, { additionalProperties: true })
+
+const UsersResponseSchema = Type.Array(JellyfinUserResponseSchema)
 
 export type JellyfinFetch = (
   input: string | URL | Request,
@@ -74,52 +91,23 @@ function tokenAuthorization(token: string): string {
   return mediaBrowserAuthorization([['Token', token]])
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function parseUser(value: unknown): JellyfinUser {
-  if (!isRecord(value) || typeof value.Id !== 'string' || !value.Id) {
-    throw new TypeError('user id is missing')
-  }
-  if (typeof value.Name !== 'string' || !value.Name) {
-    throw new TypeError('user name is missing')
-  }
-  if (
-    value.PrimaryImageTag !== undefined && value.PrimaryImageTag !== null &&
-    typeof value.PrimaryImageTag !== 'string'
-  ) {
-    throw new TypeError('primary image tag is invalid')
-  }
-
-  let isAdmin = false
-  if (value.Policy !== undefined && value.Policy !== null) {
-    if (!isRecord(value.Policy)) throw new TypeError('user policy is invalid')
-    const administrator = value.Policy.IsAdministrator
-    if (administrator !== undefined && typeof administrator !== 'boolean') {
-      throw new TypeError('administrator policy is invalid')
-    }
-    isAdmin = administrator ?? false
-  }
-
+  const user = decode(JellyfinUserResponseSchema, value)
   return {
-    id: value.Id,
-    name: value.Name,
-    isAdmin,
-    avatarTag: value.PrimaryImageTag ?? null,
+    id: user.Id,
+    name: user.Name,
+    isAdmin: user.Policy?.IsAdministrator ?? false,
+    avatarTag: user.PrimaryImageTag ?? null,
   }
 }
 
 function parseAuthentication(value: unknown): { token: string; user: JellyfinUser } {
-  if (!isRecord(value) || typeof value.AccessToken !== 'string' || !value.AccessToken) {
-    throw new TypeError('access token is missing')
-  }
-  return { token: value.AccessToken, user: parseUser(value.User) }
+  const session = decode(AuthenticationResponseSchema, value)
+  return { token: session.AccessToken, user: parseUser(session.User) }
 }
 
 function parseUsers(value: unknown): JellyfinUser[] {
-  if (!Array.isArray(value)) throw new TypeError('user list is not an array')
-  return value.map(parseUser)
+  return decode(UsersResponseSchema, value).map(parseUser)
 }
 
 export class Jellyfin {
@@ -372,15 +360,4 @@ export class Jellyfin {
       if (entry.expires <= now) this.#cache.delete(token)
     }
   }
-}
-
-export function parseCookies(header: string | null): Record<string, string> {
-  const out: Record<string, string> = {}
-  if (!header) return out
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=')
-    if (eq === -1) continue
-    out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim()
-  }
-  return out
 }

@@ -6,9 +6,10 @@
   },
   "imports": {
     "@fontsource-variable/google-sans": "npm:@fontsource-variable/google-sans@^5.3.0",
-    "@tsconfig/svelte": "npm:@tsconfig/svelte@5.0.8",
+    "@sinclair/typebox": "npm:@sinclair/typebox@0.34.52",
     "@sveltejs/vite-plugin-svelte": "npm:@sveltejs/vite-plugin-svelte@6.2.4",
-    "elysia": "npm:elysia@1.4.29",
+    "@tsconfig/svelte": "npm:@tsconfig/svelte@5.0.8",
+    "hono": "npm:hono@4.13.5",
     "lucide-svelte": "npm:lucide-svelte@^1.0.1",
     "svelte": "npm:svelte@5.56.4",
     "svelte-check": "npm:svelte-check@4.7.2",

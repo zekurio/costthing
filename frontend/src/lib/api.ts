@@ -1,13 +1,5 @@
-import type {
-  CostFile,
-  CostPoint,
-  CostSaveInput,
-  Donation,
-  DonationInput,
-  KnownUser,
-  Me,
-  Summary,
-} from '../../../shared/types.ts'
+import { hc, type InferRequestType, type PickResponseByStatusCode } from 'hono/client'
+import type { AppType } from '../../../src/app.ts'
 
 export class ApiError extends Error {
   status: number
@@ -17,30 +9,31 @@ export class ApiError extends Error {
   }
 }
 
-async function req(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(path, { credentials: 'same-origin', ...init })
-  if (!res.ok) {
-    let message = res.statusText
-    try {
-      const body = await res.json()
-      if (body?.error) message = body.error
-    } catch {
-      /* keep statusText */
+async function checkedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, { ...init, credentials: 'same-origin' })
+  if (response.ok) return response
+
+  let message = response.statusText
+  try {
+    const body: unknown = await response.json()
+    if (
+      typeof body === 'object' && body !== null && 'error' in body &&
+      typeof body.error === 'string'
+    ) {
+      message = body.error
     }
-    throw new ApiError(res.status, message)
+  } catch {
+    // Keep statusText when an ordinary HTTP resource has no JSON error body.
   }
-  return res
+  throw new ApiError(response.status, message)
 }
 
-async function jsonReq<T>(path: string, method: string, body?: unknown): Promise<T> {
-  const res = await req(path, {
-    method,
-    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
-  if (res.status === 204) return undefined as T
-  return res.json()
-}
+// checkedFetch turns every non-2xx response into ApiError before callers decode it.
+type SuccessApp = PickResponseByStatusCode<AppType, 200 | 201 | 204>
+const client = hc<SuccessApp>('/', { fetch: checkedFetch })
+
+type CostSaveInput = InferRequestType<typeof client.api.costs.$post>['json']
+type DonationSaveInput = InferRequestType<typeof client.api.donations.$post>['json']
 
 function randomDeviceId(): string {
   try {
@@ -67,23 +60,42 @@ function deviceId(): string {
 }
 
 export const api = {
-  summary: async (): Promise<Summary> => (await req('/api/summary')).json(),
-  me: async (): Promise<Me> => (await req('/api/me')).json(),
-  login: (username: string, password: string) =>
-    jsonReq<Me>('/api/auth', 'POST', { username, password, deviceId: deviceId() }),
-  logout: () => req('/api/logout', { method: 'POST' }),
-  create: (input: CostSaveInput) => jsonReq<CostPoint>('/api/costs', 'POST', input),
-  update: (id: number, input: CostSaveInput) => jsonReq<CostPoint>(`/api/costs/${id}`, 'PUT', input),
-  remove: (id: number) => jsonReq<void>(`/api/costs/${id}`, 'DELETE'),
-  createDonation: (input: DonationInput) => jsonReq<Donation>('/api/donations', 'POST', input),
-  submitDonation: (input: DonationInput) =>
-    jsonReq<Donation>('/api/donations/submit', 'POST', input),
-  confirmDonation: (id: number) => jsonReq<Donation>(`/api/donations/${id}/confirm`, 'POST'),
-  updateDonation: (id: number, input: DonationInput) =>
-    jsonReq<Donation>(`/api/donations/${id}`, 'PUT', input),
-  removeDonation: (id: number) => jsonReq<void>(`/api/donations/${id}`, 'DELETE'),
-  /** admin only: Jellyfin users incl. archived ones (accounts deleted on the server) */
-  users: async (): Promise<KnownUser[]> => (await req('/api/users')).json(),
-  exportJson: () => jsonReq<unknown>('/api/export', 'GET'),
-  importJson: (data: unknown) => jsonReq<CostFile>('/api/import', 'POST', data),
+  summary: async () => (await client.api.summary.$get()).json(),
+  me: async () => (await client.api.me.$get()).json(),
+  login: async (username: string, password: string) =>
+    (await client.api.auth.$post({
+      json: { username, password, deviceId: deviceId() },
+    })).json(),
+  logout: () => client.api.logout.$post(),
+  create: async (input: CostSaveInput) =>
+    (await client.api.costs.$post({ json: input })).json(),
+  update: async (id: number, input: CostSaveInput) =>
+    (await client.api.costs[':id'].$put({
+      param: { id: String(id) },
+      json: input,
+    })).json(),
+  remove: async (id: number) => {
+    await client.api.costs[':id'].$delete({ param: { id: String(id) } })
+  },
+  createDonation: async (input: DonationSaveInput) =>
+    (await client.api.donations.$post({ json: input })).json(),
+  submitDonation: async (input: DonationSaveInput) =>
+    (await client.api.donations.submit.$post({ json: input })).json(),
+  confirmDonation: async (id: number) =>
+    (await client.api.donations[':id'].confirm.$post({
+      param: { id: String(id) },
+    })).json(),
+  updateDonation: async (id: number, input: DonationSaveInput) =>
+    (await client.api.donations[':id'].$put({
+      param: { id: String(id) },
+      json: input,
+    })).json(),
+  removeDonation: async (id: number) => {
+    await client.api.donations[':id'].$delete({ param: { id: String(id) } })
+  },
+  /** Admin only: Jellyfin users including archived server accounts. */
+  users: async () => (await client.api.users.$get()).json(),
+  exportJson: async () => (await client.api.export.$get()).json(),
+  importJson: async (data: unknown) =>
+    (await client.api.import.$post({ json: data })).json(),
 }
