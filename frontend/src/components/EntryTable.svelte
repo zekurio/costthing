@@ -166,6 +166,25 @@
     visibleCosts.length + incomeGroups.reduce((sum, group) => sum + group.entries.length, 0),
   )
 
+  type DisplayRow =
+    | { kind: 'cost'; cost: SummaryPoint }
+    | { kind: 'income'; group: IncomeGroup }
+
+  const displayRows = $derived.by<DisplayRow[]>(() => {
+    const rows: DisplayRow[] = [
+      ...visibleCosts.map((cost): DisplayRow => ({ kind: 'cost', cost })),
+      ...incomeGroups.map((group): DisplayRow => ({ kind: 'income', group })),
+    ]
+    if (sortBy === 'date') {
+      // Income has month precision. Keep each group beside costs from that month,
+      // preserving the existing order of cost rows within a month.
+      const monthOf = (row: DisplayRow) =>
+        row.kind === 'cost' ? row.cost.startsOn.slice(0, 7) : row.group.month
+      rows.sort((a, b) => monthOf(b).localeCompare(monthOf(a)))
+    }
+    return rows
+  })
+
   // ---- confirm dialog ----
 
   let confirmDialog = $state<ConfirmDialogState | null>(null)
@@ -385,7 +404,9 @@
   </div>
 
   <ul class="rows">
-    {#each visibleCosts as p (`c${p.id}`)}
+    {#each displayRows as row (row.kind === 'cost' ? `c${row.cost.id}` : `m${row.group.month}`)}
+      {#if row.kind === 'cost'}
+      {@const p = row.cost}
       {@const cancelled = p.endsOn !== null && p.monthlyCents === 0}
       {@const Icon = costIcon(categoryIcons[p.category])}
       <li class="table-grid row" class:admin class:cancelled>
@@ -447,9 +468,8 @@
           </span>
         {/if}
       </li>
-    {/each}
-
-    {#each incomeGroups as group (group.month)}
+      {:else}
+      {@const group = row.group}
       <li class="income-group">
         <details open={query.trim().length > 0}>
           <summary>
@@ -472,7 +492,6 @@
             {#each group.entries as entry (entry.id)}
               <li class="table-grid row income-row" class:admin>
                 <div class="cell-posten income-note">
-                  <span class="child-marker" aria-hidden="true"></span>
                   <div class="row-name">{entry.note ?? 'Einnahme'}</div>
                 </div>
                 <span class="cell col-art"></span>
@@ -504,6 +523,7 @@
           </ul>
         </details>
       </li>
+      {/if}
     {/each}
 
     {#if visibleEntryCount === 0}
@@ -738,21 +758,9 @@
     border-top: 1px solid var(--line);
   }
 
-  .income-note {
-    gap: 12px;
-  }
-
   .income-note .row-name {
     font-size: 15px;
     font-weight: 600;
-  }
-
-  .child-marker {
-    width: 6px;
-    height: 6px;
-    flex: 0 0 6px;
-    border-radius: 50%;
-    background: var(--ok);
   }
 
   .row {
