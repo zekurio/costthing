@@ -470,6 +470,9 @@
       </li>
       {:else}
       {@const group = row.group}
+      {#if group.entries.length === 1}
+        {@render incomeRow(group.entries[0]!, false)}
+      {:else}
       <li class="income-group">
         <details open={query.trim().length > 0}>
           <summary>
@@ -490,39 +493,12 @@
           </summary>
           <ul class="income-children">
             {#each group.entries as entry (entry.id)}
-              <li class="table-grid row income-row" class:admin>
-                <div class="cell-posten income-note">
-                  <div class="row-name">{entry.note ?? 'Einnahme'}</div>
-                </div>
-                <span class="cell col-art"></span>
-                <span class="cell col-date"></span>
-                <span class="cell row-amount">
-                  <span class="amount-main income-amount">{cents(fmt, entry.amountCents)}</span>
-                </span>
-                {#if admin}
-                  <span class="cell row-admin">
-                    <button
-                      onclick={() => void openEditor({ kind: 'income', income: entry })}
-                      title="bearbeiten"
-                      aria-label={`${entry.note ?? 'Einnahme'} bearbeiten`}
-                    >
-                      <Pencil size={15} />
-                    </button>
-                    <button
-                      class="danger"
-                      onclick={() => askRemoveIncome(entry)}
-                      title="löschen"
-                      aria-label={`${entry.note ?? 'Einnahme'} löschen`}
-                    >
-                      <X size={16} />
-                    </button>
-                  </span>
-                {/if}
-              </li>
+              {@render incomeRow(entry, true)}
             {/each}
           </ul>
         </details>
       </li>
+      {/if}
       {/if}
     {/each}
 
@@ -531,6 +507,48 @@
     {/if}
   </ul>
 </section>
+
+{#snippet incomeRow(entry: IncomeEntry, compact: boolean)}
+  <li class="table-grid row" class:income-row={compact} class:admin>
+    <div class="cell-posten" class:income-note={compact}>
+      {#if !compact}
+        <span class="letter-tile income-tile" aria-hidden="true">
+          <HandHeart size={18} />
+        </span>
+      {/if}
+      <div>
+        <div class="row-name">{entry.note ?? 'Einnahme'}</div>
+        {#if !compact}
+          <div class="row-cat muted">Einnahme · {formatMonthYear(entry.month)}</div>
+        {/if}
+      </div>
+    </div>
+    <span class="cell col-art"></span>
+    <span class="cell muted col-date">{compact ? '' : formatMonthYear(entry.month)}</span>
+    <span class="cell row-amount">
+      <span class="amount-main income-amount">{cents(fmt, entry.amountCents)}</span>
+    </span>
+    {#if admin}
+      <span class="cell row-admin">
+        <button
+          onclick={() => void openEditor({ kind: 'income', income: entry })}
+          title="bearbeiten"
+          aria-label={`${entry.note ?? 'Einnahme'} bearbeiten`}
+        >
+          <Pencil size={15} />
+        </button>
+        <button
+          class="danger"
+          onclick={() => askRemoveIncome(entry)}
+          title="löschen"
+          aria-label={`${entry.note ?? 'Einnahme'} löschen`}
+        >
+          <X size={16} />
+        </button>
+      </span>
+    {/if}
+  </li>
+{/snippet}
 
 {#if editing && EntryForm}
   <EntryForm
