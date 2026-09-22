@@ -1,5 +1,6 @@
 <script lang="ts">
   import HandHeart from 'lucide-svelte/icons/hand-heart'
+  import ChevronDown from 'lucide-svelte/icons/chevron-down'
   import Pencil from 'lucide-svelte/icons/pencil'
   import Scissors from 'lucide-svelte/icons/scissors'
   import X from 'lucide-svelte/icons/x'
@@ -50,6 +51,7 @@
   }: Props = $props()
 
   type Entry = { kind: 'cost'; cost: SummaryPoint } | { kind: 'income'; income: IncomeEntry }
+  type IncomeGroup = { month: string; entries: IncomeEntry[] }
 
   let query = $state('')
   let filterType = $state<'all' | 'costs' | 'income'>('all')
@@ -109,38 +111,60 @@
   function incomeVisible(entry: IncomeEntry, q: string): boolean {
     // Category and cadence describe costs, so selecting either excludes income.
     if (filterType === 'all' && (filterCategory !== 'all' || filterCadence !== 'all')) return false
-    if (q && !entry.note?.toLowerCase().includes(q)) return false
+    const searchable = `${entry.note ?? ''} ${entry.month} ${formatMonthYear(entry.month)}`
+      .toLowerCase()
+    if (q && !searchable.includes(q)) return false
     return true
   }
 
-  const visibleEntries = $derived.by<Entry[]>(() => {
-    const q = query.trim().toLowerCase()
-    let list: Entry[] = []
-    if (filterType !== 'income') {
-      for (const p of points) if (costVisible(p, q)) list.push({ kind: 'cost', cost: p })
-    }
-    if (filterType !== 'costs') {
-      for (const entry of income) {
-        if (incomeVisible(entry, q)) list.push({ kind: 'income', income: entry })
-      }
-    }
-    const dateOf = (e: Entry) => (e.kind === 'cost' ? e.cost.startsOn : e.income.month)
-    const nameOf = (e: Entry) => (e.kind === 'cost' ? e.cost.name : e.income.note ?? '')
-    const amountOf = (e: Entry) => (e.kind === 'cost' ? e.cost.monthlyCents : e.income.amountCents)
+  function sortCosts(list: SummaryPoint[]): SummaryPoint[] {
     switch (sortBy) {
       case 'name':
-        list = [...list].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'de'))
-        break
+        return [...list].sort((a, b) => a.name.localeCompare(b.name, 'de'))
       case 'amount':
-        list = [...list].sort((a, b) => amountOf(b) - amountOf(a))
-        break
+        return [...list].sort((a, b) => b.monthlyCents - a.monthlyCents)
       default:
-        list = [...list].sort(
-          (a, b) => dateOf(b).localeCompare(dateOf(a)) || nameOf(a).localeCompare(nameOf(b), 'de'),
+        return [...list].sort(
+          (a, b) => b.startsOn.localeCompare(a.startsOn) || a.name.localeCompare(b.name, 'de'),
         )
     }
-    return list
+  }
+
+  function sortIncome(list: IncomeEntry[]): IncomeEntry[] {
+    switch (sortBy) {
+      case 'name':
+        return [...list].sort((a, b) => (a.note ?? '').localeCompare(b.note ?? '', 'de'))
+      case 'amount':
+        return [...list].sort((a, b) => b.amountCents - a.amountCents)
+      default:
+        return [...list].sort((a, b) => (a.note ?? '').localeCompare(b.note ?? '', 'de'))
+    }
+  }
+
+  const visibleCosts = $derived.by(() => {
+    const q = query.trim().toLowerCase()
+    if (filterType === 'income') return []
+    return sortCosts(points.filter((point) => costVisible(point, q)))
   })
+
+  const incomeGroups = $derived.by<IncomeGroup[]>(() => {
+    if (filterType === 'costs') return []
+    const q = query.trim().toLowerCase()
+    const groups = new Map<string, IncomeEntry[]>()
+    for (const entry of income) {
+      if (!incomeVisible(entry, q)) continue
+      const entries = groups.get(entry.month)
+      if (entries) entries.push(entry)
+      else groups.set(entry.month, [entry])
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([month, entries]) => ({ month, entries: sortIncome(entries) }))
+  })
+
+  const visibleEntryCount = $derived(
+    visibleCosts.length + incomeGroups.reduce((sum, group) => sum + group.entries.length, 0),
+  )
 
   // ---- confirm dialog ----
 
@@ -279,7 +303,7 @@
   <div class="section-head">
     <h2 class="section-title">Alle Einträge</h2>
     <div class="section-meta">
-      <span class="muted">{visibleEntries.length} von {points.length + income.length}</span>
+      <span class="muted">{visibleEntryCount} von {points.length + income.length}</span>
       {#if income.length > 0}
         <span class="muted" title="Einnahmen abzüglich Kosten seit der ersten erfassten Einnahme">
           Gesamtsaldo
@@ -361,109 +385,130 @@
   </div>
 
   <ul class="rows">
-    {#each visibleEntries as e (e.kind === 'cost' ? `c${e.cost.id}` : `i${e.income.id}`)}
-      {@const cancelled = e.kind === 'cost' && e.cost.endsOn !== null && e.cost.monthlyCents === 0}
+    {#each visibleCosts as p (`c${p.id}`)}
+      {@const cancelled = p.endsOn !== null && p.monthlyCents === 0}
+      {@const Icon = costIcon(categoryIcons[p.category])}
       <li class="table-grid row" class:admin class:cancelled>
-        {#if e.kind === 'cost'}
-          {@const p = e.cost}
-          {@const Icon = costIcon(categoryIcons[p.category])}
-          <div class="cell-posten">
-            <span
-              class="letter-tile"
-              style:background="color-mix(in srgb, {categoryColor(p.category)} 28%, transparent)"
-              style:color={categoryTextColor(p.category)}
-            >
-              {#if Icon}
-                <Icon size={19} />
-              {:else}
-                {p.category.charAt(0).toUpperCase()}
-              {/if}
-            </span>
-            <div>
-              <div class="row-name">{p.name}</div>
-              <div class="row-cat muted">{p.category}</div>
-            </div>
-          </div>
-          <span class="cell muted col-art">
-            {artLabel(p)}{p.endsOn ? ` · bis ${formatMonthYear(p.endsOn)}` : ''}
-          </span>
-          <span class="cell muted col-date">{formatMonthYear(p.startsOn)}</span>
-          <span class="cell row-amount">
-            {#if p.monthlyCents > 0}
-              <span class="amount-main">{cents(fmt, p.monthlyCents)}</span>
-              <span class="amount-sub muted">{cents(fmt, p.monthlyCents * 12)}/Jahr</span>
+        <div class="cell-posten">
+          <span
+            class="letter-tile"
+            style:background="color-mix(in srgb, {categoryColor(p.category)} 28%, transparent)"
+            style:color={categoryTextColor(p.category)}
+          >
+            {#if Icon}
+              <Icon size={19} />
             {:else}
-              –
+              {p.category.charAt(0).toUpperCase()}
             {/if}
           </span>
-          {#if admin}
-            <span class="cell row-admin">
-              {#if !p.endsOn}
-                <button
-                  onclick={() => askCancel(p)}
-                  title="kündigen (Ende = heute)"
-                  aria-label={`${p.name} kündigen`}
-                >
-                  <Scissors size={15} />
-                </button>
-              {/if}
-              <button
-                onclick={() => void openEditor({ kind: 'cost', cost: p })}
-                title="bearbeiten"
-                aria-label={`${p.name} bearbeiten`}
-              >
-                <Pencil size={15} />
-              </button>
-              <button
-                class="danger"
-                onclick={() => askRemove(p)}
-                title="löschen"
-                aria-label={`${p.name} löschen`}
-              >
-                <X size={16} />
-              </button>
-            </span>
+          <div>
+            <div class="row-name">{p.name}</div>
+            <div class="row-cat muted">{p.category}</div>
+          </div>
+        </div>
+        <span class="cell muted col-art">
+          {artLabel(p)}{p.endsOn ? ` · bis ${formatMonthYear(p.endsOn)}` : ''}
+        </span>
+        <span class="cell muted col-date">{formatMonthYear(p.startsOn)}</span>
+        <span class="cell row-amount">
+          {#if p.monthlyCents > 0}
+            <span class="amount-main">{cents(fmt, p.monthlyCents)}</span>
+            <span class="amount-sub muted">{cents(fmt, p.monthlyCents * 12)}/Jahr</span>
+          {:else}
+            –
           {/if}
-        {:else}
-          {@const entry = e.income}
-          <div class="cell-posten">
-            <span class="letter-tile income-tile">
+        </span>
+        {#if admin}
+          <span class="cell row-admin">
+            {#if !p.endsOn}
+              <button
+                onclick={() => askCancel(p)}
+                title="kündigen (Ende = heute)"
+                aria-label={`${p.name} kündigen`}
+              >
+                <Scissors size={15} />
+              </button>
+            {/if}
+            <button
+              onclick={() => void openEditor({ kind: 'cost', cost: p })}
+              title="bearbeiten"
+              aria-label={`${p.name} bearbeiten`}
+            >
+              <Pencil size={15} />
+            </button>
+            <button
+              class="danger"
+              onclick={() => askRemove(p)}
+              title="löschen"
+              aria-label={`${p.name} löschen`}
+            >
+              <X size={16} />
+            </button>
+          </span>
+        {/if}
+      </li>
+    {/each}
+
+    {#each incomeGroups as group (group.month)}
+      <li class="income-group">
+        <details open={query.trim().length > 0}>
+          <summary>
+            <span class="group-chevron" aria-hidden="true"><ChevronDown size={18} /></span>
+            <span
+              class="letter-tile income-tile"
+              aria-hidden="true"
+            >
               <HandHeart size={18} />
             </span>
             <div>
-              <div class="row-name">{entry.note ?? 'Einnahme'}</div>
-              <div class="row-cat muted">Einnahme</div>
+              <div class="row-name">{formatMonthYear(group.month)}</div>
+              <div class="row-cat muted">
+                {group.entries.length}
+                {group.entries.length === 1 ? 'Einnahme' : 'Einnahmen'}
+              </div>
             </div>
-          </div>
-          <span class="cell muted col-art">einmalig</span>
-          <span class="cell muted col-date">{formatMonthYear(entry.month)}</span>
-          <span class="cell row-amount">
-            <span class="amount-main income-amount">{cents(fmt, entry.amountCents)}</span>
-          </span>
-          {#if admin}
-            <span class="cell row-admin">
-              <button
-                onclick={() => void openEditor({ kind: 'income', income: entry })}
-                title="bearbeiten"
-                aria-label="Einnahme bearbeiten"
-              >
-                <Pencil size={15} />
-              </button>
-              <button
-                class="danger"
-                onclick={() => askRemoveIncome(entry)}
-                title="löschen"
-                aria-label="Einnahme löschen"
-              >
-                <X size={16} />
-              </button>
-            </span>
-          {/if}
-        {/if}
+          </summary>
+          <ul class="income-children">
+            {#each group.entries as entry (entry.id)}
+              <li class="table-grid row income-row" class:admin>
+                <div class="cell-posten income-note">
+                  <span class="child-marker" aria-hidden="true"></span>
+                  <div class="row-name">{entry.note ?? 'Einnahme'}</div>
+                </div>
+                <span class="cell col-art"></span>
+                <span class="cell col-date"></span>
+                <span class="cell row-amount">
+                  <span class="amount-main income-amount">{cents(fmt, entry.amountCents)}</span>
+                </span>
+                {#if admin}
+                  <span class="cell row-admin">
+                    <button
+                      onclick={() => void openEditor({ kind: 'income', income: entry })}
+                      title="bearbeiten"
+                      aria-label={`${entry.note ?? 'Einnahme'} bearbeiten`}
+                    >
+                      <Pencil size={15} />
+                    </button>
+                    <button
+                      class="danger"
+                      onclick={() => askRemoveIncome(entry)}
+                      title="löschen"
+                      aria-label={`${entry.note ?? 'Einnahme'} löschen`}
+                    >
+                      <X size={16} />
+                    </button>
+                  </span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </details>
       </li>
-    {:else}
-      <li class="empty muted">Keine Einträge gefunden.</li>
     {/each}
+
+    {#if visibleEntryCount === 0}
+      <li class="empty muted">Keine Einträge gefunden.</li>
+    {/if}
   </ul>
 </section>
 
@@ -637,6 +682,79 @@
     padding: 0;
   }
 
+  .income-group {
+    border-top: 1px solid var(--line);
+  }
+
+  .income-group summary {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 64px;
+    padding: 10px 0;
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .income-group summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .income-group summary:hover .row-name {
+    color: var(--accent-strong);
+  }
+
+  .income-group summary:focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 2px;
+    border-radius: 8px;
+  }
+
+  .group-chevron {
+    display: grid;
+    place-items: center;
+    flex: 0 0 20px;
+    color: var(--muted);
+    transition: transform 120ms ease;
+  }
+
+  details[open] .group-chevron {
+    transform: rotate(180deg);
+  }
+
+  .income-children {
+    list-style: none;
+    margin: 0 0 4px 34px;
+    padding: 0 0 0 20px;
+    border-left: 2px solid var(--accent-soft);
+  }
+
+  .income-row {
+    min-height: 52px;
+    padding: 8px 0;
+  }
+
+  .income-row + .income-row {
+    border-top: 1px solid var(--line);
+  }
+
+  .income-note {
+    gap: 12px;
+  }
+
+  .income-note .row-name {
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .child-marker {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 6px;
+    border-radius: 50%;
+    background: var(--ok);
+  }
+
   .row {
     padding: 11px 0;
   }
@@ -770,6 +888,24 @@
 
     .row {
       padding: 14px 0;
+    }
+
+    .income-group summary {
+      gap: 10px;
+      min-height: 64px;
+    }
+
+    .income-children {
+      margin-left: 10px;
+      padding-left: 14px;
+    }
+
+    .income-row {
+      padding: 12px 0;
+    }
+
+    .income-row .row-admin {
+      justify-content: flex-end;
     }
 
     .cell-posten {
