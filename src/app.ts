@@ -17,7 +17,7 @@ import {
   type Summary,
 } from '../shared/types.ts'
 import { amortizationElapsed, annualizedCents, monthlyCents } from './calc.ts'
-import { buildCoverage, buildTimeline } from './summary.ts'
+import { buildCoverage, buildIncomeTotals, buildTimeline } from './summary.ts'
 import { typeboxValidator } from './validation.ts'
 
 const COOKIE = 'costthing_session'
@@ -149,6 +149,7 @@ function summary(store: AppStore): Summary {
     },
     points,
     income,
+    incomeByMonth: buildIncomeTotals(income),
     categoryIcons: store.categoryIcons,
     coverage: buildCoverage(timeline, income, now),
     timeline,

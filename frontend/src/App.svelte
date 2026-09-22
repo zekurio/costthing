@@ -360,6 +360,7 @@
         <EntryTable
           points={summary.points}
           income={summary.income}
+          incomeByMonth={summary.incomeByMonth}
           categoryIcons={summary.categoryIcons}
           coverage={summary.coverage}
           {fmt}

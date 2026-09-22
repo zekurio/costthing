@@ -180,6 +180,8 @@ export const SummarySchema = Type.Object({
   }, { additionalProperties: false }),
   points: Type.Array(SummaryPointSchema),
   income: Type.Array(IncomeEntrySchema),
+  /** Total booked income by month, including months outside the chart's range. */
+  incomeByMonth: Type.Record(Type.String(), Type.Number()),
   categoryIcons: Type.Record(Type.String(), Type.String()),
   coverage: CoverageSchema,
   timeline: Type.Array(TimelineEntrySchema),

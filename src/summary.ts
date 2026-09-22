@@ -1,6 +1,15 @@
 import type { CostPoint, Coverage, IncomeEntry, TimelineEntry } from '../shared/types.ts'
 import { incomeCentsForMonth, monthlyCents } from './calc.ts'
 
+/** All booked months, independent of the timeline's forecast window. */
+export function buildIncomeTotals(income: IncomeEntry[]): Record<string, number> {
+  const totals: Record<string, number> = {}
+  for (const entry of income) {
+    totals[entry.month] = (totals[entry.month] ?? 0) + entry.amountCents
+  }
+  return totals
+}
+
 function monthOf(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`
 }

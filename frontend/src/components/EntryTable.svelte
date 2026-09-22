@@ -31,6 +31,7 @@
   interface Props {
     points: SummaryPoint[]
     income: IncomeEntry[]
+    incomeByMonth: Record<string, number>
     categoryIcons: Record<string, string>
     coverage: Coverage
     fmt: Intl.NumberFormat
@@ -42,6 +43,7 @@
   let {
     points,
     income,
+    incomeByMonth,
     categoryIcons,
     coverage,
     fmt,
@@ -475,7 +477,8 @@
       {:else}
       <li class="income-group">
         <details open={query.trim().length > 0}>
-          <summary>
+          <summary class="table-grid" class:admin>
+            <span class="group-heading">
             <span class="group-chevron" aria-hidden="true"><ChevronDown size={18} /></span>
             <span
               class="letter-tile income-tile"
@@ -483,13 +486,21 @@
             >
               <HandHeart size={18} />
             </span>
-            <div>
-              <div class="row-name">{formatMonthYear(group.month)}</div>
-              <div class="row-cat muted">
+            <span>
+              <span class="row-name group-label">{formatMonthYear(group.month)}</span>
+              <span class="row-cat muted group-label">
                 {group.entries.length}
                 {group.entries.length === 1 ? 'Einnahme' : 'Einnahmen'}
-              </div>
-            </div>
+              </span>
+            </span>
+            </span>
+            <span class="col-art"></span>
+            <span class="col-date"></span>
+            <span class="cell row-amount">
+              <span class="amount-main income-amount">{cents(fmt, incomeByMonth[group.month] ?? 0)}</span>
+              <span class="amount-sub muted">Monat gesamt</span>
+            </span>
+            {#if admin}<span class="group-admin-space"></span>{/if}
           </summary>
           <ul class="income-children">
             {#each group.entries as entry (entry.id)}
@@ -725,13 +736,22 @@
   }
 
   .income-group summary {
-    display: flex;
     align-items: center;
-    gap: 14px;
     min-height: 64px;
     padding: 10px 0;
     cursor: pointer;
     list-style: none;
+  }
+
+  .group-heading {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+  }
+
+  .group-label {
+    display: block;
   }
 
   .income-group summary::-webkit-details-marker {
@@ -919,6 +939,10 @@
     .income-group summary {
       gap: 10px;
       min-height: 64px;
+    }
+
+    .group-admin-space {
+      display: none;
     }
 
     .income-children {

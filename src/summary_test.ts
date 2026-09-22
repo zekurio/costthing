@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert'
 import type { CostPoint, IncomeEntry } from '../shared/types.ts'
-import { buildCoverage, buildTimeline } from './summary.ts'
+import { buildCoverage, buildIncomeTotals, buildTimeline } from './summary.ts'
 
 function cost(overrides: Partial<CostPoint> = {}): CostPoint {
   return {
@@ -28,6 +28,18 @@ function income(overrides: Partial<IncomeEntry> = {}): IncomeEntry {
     ...overrides,
   }
 }
+
+Deno.test('income totals include every booked month and preserve whole cents', () => {
+  assert.deepEqual(buildIncomeTotals([]), {})
+  assert.deepEqual(
+    buildIncomeTotals([
+      income({ id: 1, month: '2026-06', amountCents: 501 }),
+      income({ id: 2, month: '2026-06', amountCents: 250 }),
+      income({ id: 3, month: '2040-12', amountCents: 999 }),
+    ]),
+    { '2026-06': 751, '2040-12': 999 },
+  )
+})
 
 Deno.test('timeline follows price changes', () => {
   const timeline = buildTimeline(
