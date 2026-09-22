@@ -1,11 +1,6 @@
 import { strict as assert } from 'node:assert'
-import type { CostPoint, Donation, IntervalUnit } from '../shared/types.ts'
-import {
-  amortizationElapsed,
-  annualizedCents,
-  donationCentsForMonth,
-  monthlyCents,
-} from './calc.ts'
+import type { CostPoint, IncomeEntry, IntervalUnit } from '../shared/types.ts'
+import { amortizationElapsed, annualizedCents, incomeCentsForMonth, monthlyCents } from './calc.ts'
 
 function utcDate(date: string): Date {
   return new Date(`${date}T00:00:00.000Z`)
@@ -36,17 +31,12 @@ function cost(overrides: Partial<CostPoint> = {}): CostPoint {
   }
 }
 
-function donation(overrides: Partial<Donation> = {}): Donation {
+function income(overrides: Partial<IncomeEntry> = {}): IncomeEntry {
   return {
     id: 1,
-    name: 'Test',
+    month: '2026-07',
     amountCents: 750,
-    cadence: 'one_time',
-    receivedOn: '2026-07-24',
-    endsOn: null,
-    status: 'confirmed',
-    submittedBy: null,
-    userId: null,
+    note: null,
     ...overrides,
   }
 }
@@ -334,50 +324,14 @@ Deno.test('leap-day recurring costs include their complete start and end month',
   assert.equal(monthlyCents(point, utcDate('2024-03-01')), 0)
 })
 
-Deno.test('one-off donations only count in their receipt month', () => {
-  const value = donation()
-  assert.equal(donationCentsForMonth(value, '2026-06'), 0)
-  assert.equal(donationCentsForMonth(value, '2026-07'), 750)
-  assert.equal(donationCentsForMonth(value, '2026-08'), 0)
-})
-
-Deno.test('monthly donations repeat through their end month', () => {
-  const value = donation({ cadence: 'monthly', endsOn: '2026-09-02' })
-  assert.equal(donationCentsForMonth(value, '2026-06'), 0)
-  assert.equal(donationCentsForMonth(value, '2026-07'), 750)
-  assert.equal(donationCentsForMonth(value, '2026-09'), 750)
-  assert.equal(donationCentsForMonth(value, '2026-10'), 0)
-})
-
-Deno.test('yearly leap-day donations recur in February through their end month', () => {
-  const value = donation({
-    cadence: 'yearly',
-    receivedOn: '2024-02-29',
-    endsOn: '2026-02-01',
-  })
-  assert.equal(donationCentsForMonth(value, '2024-01'), 0)
-  assert.equal(donationCentsForMonth(value, '2024-02'), 750)
-  assert.equal(donationCentsForMonth(value, '2024-03'), 0)
-  assert.equal(donationCentsForMonth(value, '2025-02'), 750)
-  assert.equal(donationCentsForMonth(value, '2026-02'), 750)
-  assert.equal(donationCentsForMonth(value, '2027-02'), 0)
-})
-
-Deno.test('pending donations never count for any cadence', () => {
-  const cases: Array<{ value: Donation; month: string }> = [
-    { value: donation({ status: 'pending', submittedBy: 'alex' }), month: '2026-07' },
-    {
-      value: donation({ cadence: 'monthly', status: 'pending', submittedBy: 'alex' }),
-      month: '2026-08',
-    },
-    {
-      value: donation({ cadence: 'yearly', status: 'pending', submittedBy: 'alex' }),
-      month: '2027-07',
-    },
+Deno.test('income entries count only in their booked month and sum up', () => {
+  const entries = [
+    income(),
+    income({ id: 2, month: '2026-07', amountCents: 250, note: 'Kasse' }),
+    income({ id: 3, month: '2026-08', amountCents: 1_000 }),
   ]
-
-  for (const { value, month } of cases) {
-    assert.equal(donationCentsForMonth(value, month), 0)
-    assert.equal(donationCentsForMonth({ ...value, status: 'confirmed' }, month), 750)
-  }
+  assert.equal(incomeCentsForMonth(entries, '2026-06'), 0)
+  assert.equal(incomeCentsForMonth(entries, '2026-07'), 1_000)
+  assert.equal(incomeCentsForMonth(entries, '2026-08'), 1_000)
+  assert.equal(incomeCentsForMonth([], '2026-07'), 0)
 })

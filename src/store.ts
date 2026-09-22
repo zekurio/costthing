@@ -5,9 +5,8 @@ import {
   CostFileSchema,
   type CostInput,
   type CostPoint,
-  type Donation,
-  type DonationInput,
-  type KnownUser,
+  type IncomeEntry,
+  type IncomeInput,
   type PriceChange,
 } from '../shared/types.ts'
 import { decode, TypeBoxValidationError } from './validation.ts'
@@ -18,15 +17,27 @@ const MAX_COST_CENTS = Math.floor(Number.MAX_SAFE_INTEGER / 12)
 
 // Legacy files omit newer collections, so TypeBox checks the migration envelope
 // before the normalizer fills defaults and enforces semantic invariants.
+// donations/knownUsers are schema v1 leftovers, accepted only to be migrated.
 const StoredFileEnvelopeSchema = Type.Object({
   schemaVersion: Type.Unknown(),
   currency: Type.String(),
   exportedAt: Type.Optional(Type.Unknown()),
   costPoints: Type.Array(Type.Unknown()),
+  income: Type.Optional(Type.Array(Type.Unknown())),
   donations: Type.Optional(Type.Array(Type.Unknown())),
   knownUsers: Type.Optional(Type.Array(Type.Unknown())),
   categoryIcons: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 }, { additionalProperties: true })
+
+/** Shape of a schema v1 donation, parsed only by the one-time income migration. */
+interface LegacyDonation {
+  name: string
+  amountCents: number
+  cadence: 'one_time' | 'monthly' | 'yearly'
+  receivedOn: string
+  endsOn: string | null
+  status: 'confirmed' | 'pending'
+}
 
 export class StoreValidationError extends Error {
   override name = 'StoreValidationError'
@@ -41,42 +52,44 @@ export class Store {
   #data: CostFile
   #committedData: CostFile
   #costIdHighWater: number
-  #donationIdHighWater: number
+  #incomeIdHighWater: number
   #writeQueue: Promise<void> = Promise.resolve()
 
   private constructor(
     file: string,
     data: CostFile,
     costIdHighWater: number,
-    donationIdHighWater: number,
+    incomeIdHighWater: number,
   ) {
     this.#file = file
     this.#data = data
     this.#committedData = clone(data)
     this.#costIdHighWater = costIdHighWater
-    this.#donationIdHighWater = donationIdHighWater
+    this.#incomeIdHighWater = incomeIdHighWater
   }
 
   static async load(file: string): Promise<Store> {
     const raw = await readOptionalTextFile(file)
     let data: CostFile
+    let needsMigration = false
     if (raw !== null) {
-      data = normalizeCostFile(JSON.parse(raw), false)
+      const parsed: unknown = JSON.parse(raw)
+      needsMigration = record(parsed, 'root').schemaVersion === 1
+      data = normalizeCostFile(parsed, false)
     } else {
       console.log(`[store] no data file at ${file}, starting empty`)
       data = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         currency: 'EUR',
         exportedAt: new Date().toISOString(),
         costPoints: [],
-        donations: [],
-        knownUsers: [],
+        income: [],
         categoryIcons: {},
       }
     }
 
     // A deletion's previous state is normally still in the one-step backup.
-    // It is a useful best-effort high-water seed without changing schema v1.
+    // It is a useful best-effort high-water seed without persisting counters.
     const backupRaw = await readOptionalTextFile(`${file}.bak`)
     let backup: CostFile | null = null
     if (backupRaw !== null) {
@@ -91,9 +104,15 @@ export class Store {
       file,
       data,
       Math.max(maxId(data.costPoints), maxId(backup?.costPoints ?? [])),
-      Math.max(maxId(data.donations), maxId(backup?.donations ?? [])),
+      Math.max(maxId(data.income), maxId(backup?.income ?? [])),
     )
     if (raw === null) {
+      await store.#mutate(async () => {
+        await store.#persist()
+      })
+    } else if (needsMigration) {
+      // Commit the time-dependent donation expansion now. Leaving schema v1 on
+      // disk would add another month of income if the process restarted later.
       await store.#mutate(async () => {
         await store.#persist()
       })
@@ -157,210 +176,40 @@ export class Store {
     })
   }
 
-  listKnownUsers(): KnownUser[] {
-    return clone(this.#committedData.knownUsers).sort((a, b) =>
-      Number(a.archived) - Number(b.archived) || a.name.localeCompare(b.name)
+  listIncome(): IncomeEntry[] {
+    return clone(this.#committedData.income).sort(
+      (a, b) => b.month.localeCompare(a.month) || b.id - a.id,
     )
   }
 
-  /**
-   * Reconciles the archive with the users currently on the Jellyfin server:
-   * present users are upserted (name refreshed, un-archived), users that
-   * disappeared are kept but marked archived — never deleted, so donations
-   * stay attributable and returning donors map to the same id.
-   */
-  async syncKnownUsers(current: Array<{ id: string; name: string }>): Promise<KnownUser[]> {
-    const users = normalizeUserSightings(current, 'users')
+  async addIncome(input: IncomeInput): Promise<IncomeEntry> {
+    const next = normalizeIncomeInput(input, 'income')
     return await this.#mutate(async () => {
-      const now = new Date().toISOString()
-      const seen = new Set(users.map((user) => user.id))
-
-      for (const user of users) this.#touchKnownUser(user, now)
-      for (const known of this.#data.knownUsers) {
-        if (!seen.has(known.id)) known.archived = true
-      }
-
+      const id = this.#allocateIncomeId()
+      this.#data.income.push({ ...next, id })
       await this.#persist()
-      return clone(this.#data.knownUsers).sort((a, b) =>
-        Number(a.archived) - Number(b.archived) || a.name.localeCompare(b.name)
-      )
+      return clone(this.#data.income.find((entry) => entry.id === id)!)
     })
   }
 
-  /** exact-name lookup among known users — active accounts win over archived, ambiguity yields null */
-  #userByName(name: string): KnownUser | null {
-    const needle = name.trim().toLowerCase()
-    if (!needle) return null
-    const matches = this.#data.knownUsers.filter((user) =>
-      user.name.trim().toLowerCase() === needle
-    )
-    const active = matches.filter((user) => !user.archived)
-    if (active.length === 1) return active[0]!
-    if (active.length === 0 && matches.length === 1) return matches[0]!
-    return null
-  }
-
-  /**
-   * One donor name, one identity. Only confirmed donations may establish or
-   * inherit an identity; a self-submission must not relink history while it is
-   * pending. Names claimed by different confirmed users remain ambiguous.
-   */
-  #reconcileDonationLinks(): boolean {
-    const claimed = new Map<string, string | null>()
-    const pendingNames = new Set<string>()
-    for (const donation of this.#data.donations) {
-      const key = donation.name.trim().toLowerCase()
-      if (donation.status === 'pending') {
-        pendingNames.add(key)
-        continue
-      }
-      if (!donation.userId) continue
-      claimed.set(
-        key,
-        claimed.has(key) && claimed.get(key) !== donation.userId ? null : donation.userId,
-      )
-    }
-
-    let changed = false
-    for (const donation of this.#data.donations) {
-      if (donation.status !== 'confirmed' || donation.userId) continue
-      const key = donation.name.trim().toLowerCase()
-      if (claimed.has(key)) {
-        const inherited = claimed.get(key)
-        if (inherited) {
-          donation.userId = inherited
-          changed = true
-        }
-        continue
-      }
-      if (pendingNames.has(key)) continue
-      const user = this.#userByName(donation.name)
-      if (user) {
-        donation.userId = user.id
-        changed = true
-      }
-    }
-    return changed
-  }
-
-  /** Records a single user sighting (e.g. the submitter of a donation). */
-  async touchKnownUser(user: { id: string; name: string }): Promise<void> {
-    const validUser = normalizeUserSighting(user, 'user')
-    await this.#mutate(async () => {
-      this.#touchKnownUser(validUser, new Date().toISOString())
-      await this.#persist()
-    })
-  }
-
-  #touchKnownUser(user: { id: string; name: string }, now: string): void {
-    const known = this.#data.knownUsers.find((candidate) => candidate.id === user.id)
-    if (!known) {
-      this.#data.knownUsers.push({
-        id: user.id,
-        name: user.name,
-        lastSeenAt: now,
-        archived: false,
-      })
-      return
-    }
-    known.name = user.name
-    known.archived = false
-    known.lastSeenAt = now
-  }
-
-  listDonations(): Donation[] {
-    return clone(this.#committedData.donations).sort(
-      (a, b) => b.receivedOn.localeCompare(a.receivedOn) || b.id - a.id,
-    )
-  }
-
-  async addDonation(input: DonationInput): Promise<Donation> {
-    const next = normalizeDonationInput(input, 'donation')
-    return await this.#mutate(async () => {
-      const id = this.#insertDonation(next, 'confirmed', null)
-      await this.#persist()
-      return clone(this.#data.donations.find((donation) => donation.id === id)!)
-    })
-  }
-
-  /** user-submitted donation: stays pending (not counted) until an admin confirms it */
-  async submitDonation(
-    input: DonationInput,
-    submitter: { id: string; name: string },
-  ): Promise<Donation> {
-    const next = normalizeDonationInput(input, 'donation')
-    const validSubmitter = normalizeUserSighting(submitter, 'submitter')
-    return await this.#mutate(async () => {
-      this.#touchKnownUser(validSubmitter, new Date().toISOString())
-      const id = this.#insertDonation(
-        { ...next, userId: validSubmitter.id },
-        'pending',
-        validSubmitter.name,
-      )
-      await this.#persist()
-      return clone(this.#data.donations.find((donation) => donation.id === id)!)
-    })
-  }
-
-  #insertDonation(
-    input: DonationInput,
-    status: Donation['status'],
-    submittedBy: string | null,
-  ): number {
-    const id = this.#allocateDonationId()
-    this.#data.donations.push({ ...input, id, status, submittedBy })
-    return id
-  }
-
-  async confirmDonation(id: number): Promise<Donation | null> {
+  async updateIncome(id: number, input: IncomeInput): Promise<IncomeEntry | null> {
     const validId = integer(id, 'id', 1)
+    const next = normalizeIncomeInput(input, 'income')
     return await this.#mutate(async () => {
-      const donation = this.#data.donations.find((candidate) => candidate.id === validId)
-      if (!donation) return null
-      if (donation.status !== 'confirmed') {
-        donation.status = 'confirmed'
-        await this.#persist()
-      }
-      return clone(this.#data.donations.find((candidate) => candidate.id === validId)!)
-    })
-  }
-
-  async updateDonation(id: number, input: DonationInput): Promise<Donation | null> {
-    const validId = integer(id, 'id', 1)
-    const next = normalizeDonationInput(input, 'donation')
-    return await this.#mutate(async () => {
-      const index = this.#data.donations.findIndex((donation) => donation.id === validId)
+      const index = this.#data.income.findIndex((entry) => entry.id === validId)
       if (index === -1) return null
-      const existing = this.#data.donations[index]!
-      this.#data.donations[index] = {
-        ...next,
-        id: validId,
-        status: existing.status,
-        submittedBy: existing.submittedBy,
-      }
-      // A corrected manual link applies to the donor's confirmed history.
-      if (existing.status === 'confirmed' && next.userId) {
-        const donorName = next.name.trim().toLowerCase()
-        for (const donation of this.#data.donations) {
-          if (
-            donation.status === 'confirmed' &&
-            donation.name.trim().toLowerCase() === donorName
-          ) {
-            donation.userId = next.userId
-          }
-        }
-      }
+      this.#data.income[index] = { ...next, id: validId }
       await this.#persist()
-      return clone(this.#data.donations.find((donation) => donation.id === validId)!)
+      return clone(this.#data.income.find((entry) => entry.id === validId)!)
     })
   }
 
-  async removeDonation(id: number): Promise<boolean> {
+  async removeIncome(id: number): Promise<boolean> {
     const validId = integer(id, 'id', 1)
     return await this.#mutate(async () => {
-      const before = this.#data.donations.length
-      this.#data.donations = this.#data.donations.filter((donation) => donation.id !== validId)
-      if (this.#data.donations.length === before) return false
+      const before = this.#data.income.length
+      this.#data.income = this.#data.income.filter((entry) => entry.id !== validId)
+      if (this.#data.income.length === before) return false
       await this.#persist()
       return true
     })
@@ -375,10 +224,7 @@ export class Store {
     return await this.#mutate(async () => {
       this.#data = next
       this.#costIdHighWater = Math.max(this.#costIdHighWater, maxId(next.costPoints))
-      this.#donationIdHighWater = Math.max(
-        this.#donationIdHighWater,
-        maxId(next.donations),
-      )
+      this.#incomeIdHighWater = Math.max(this.#incomeIdHighWater, maxId(next.income))
       await this.#persist()
       return clone({ ...this.#data, exportedAt: new Date().toISOString() })
     })
@@ -393,20 +239,20 @@ export class Store {
     return this.#costIdHighWater
   }
 
-  #allocateDonationId(): number {
-    const highWater = Math.max(this.#donationIdHighWater, maxId(this.#data.donations))
+  #allocateIncomeId(): number {
+    const highWater = Math.max(this.#incomeIdHighWater, maxId(this.#data.income))
     if (highWater === Number.MAX_SAFE_INTEGER) {
-      throw new StoreValidationError('donation id space exhausted')
+      throw new StoreValidationError('income id space exhausted')
     }
-    this.#donationIdHighWater = highWater + 1
-    return this.#donationIdHighWater
+    this.#incomeIdHighWater = highWater + 1
+    return this.#incomeIdHighWater
   }
 
   #mutate<T>(mutation: () => Promise<T>): Promise<T> {
     const queued = this.#writeQueue.then(async () => {
       const previousData = clone(this.#data)
       const previousCostId = this.#costIdHighWater
-      const previousDonationId = this.#donationIdHighWater
+      const previousIncomeId = this.#incomeIdHighWater
       try {
         const result = await mutation()
         this.#committedData = clone(this.#data)
@@ -414,7 +260,7 @@ export class Store {
       } catch (err) {
         this.#data = previousData
         this.#costIdHighWater = previousCostId
-        this.#donationIdHighWater = previousDonationId
+        this.#incomeIdHighWater = previousIncomeId
         throw err
       }
     })
@@ -426,7 +272,6 @@ export class Store {
   }
 
   async #persist(): Promise<void> {
-    this.#reconcileDonationLinks()
     const live = new Set(this.#data.costPoints.map((point) => point.category))
     for (const category of Object.keys(this.#data.categoryIcons)) {
       if (!live.has(category)) delete this.#data.categoryIcons[category]
@@ -476,27 +321,49 @@ function normalizeCostFile(value: unknown, strict = true): CostFile {
     throw new StoreValidationError(`invalid cost file: ${error.message}`, { cause: error })
   }
   const root = record(value, 'root')
-  if (strict) {
-    knownKeys(root, 'root', [
-      'schemaVersion',
-      'currency',
-      'exportedAt',
-      'costPoints',
-      'donations',
-      'knownUsers',
-      'categoryIcons',
-    ])
+  if (root.schemaVersion !== 1 && root.schemaVersion !== 2) {
+    throw new StoreValidationError('unsupported schemaVersion (expected 1 or 2)')
   }
-  if (root.schemaVersion !== 1) {
-    throw new StoreValidationError('unsupported schemaVersion (expected 1)')
+  const schemaVersion = root.schemaVersion
+  if (strict) {
+    knownKeys(
+      root,
+      'root',
+      schemaVersion === 1
+        ? [
+          'schemaVersion',
+          'currency',
+          'exportedAt',
+          'costPoints',
+          'donations',
+          'knownUsers',
+          'categoryIcons',
+        ]
+        : [
+          'schemaVersion',
+          'currency',
+          'exportedAt',
+          'costPoints',
+          'income',
+          'categoryIcons',
+        ],
+    )
+  }
+  if (schemaVersion === 2) {
+    if (root.income === undefined) {
+      throw new StoreValidationError('income is required for schemaVersion 2')
+    }
+    if (root.donations !== undefined || root.knownUsers !== undefined) {
+      throw new StoreValidationError(
+        'donations and knownUsers are not supported for schemaVersion 2',
+      )
+    }
   }
 
   const currency = strict
     ? currencyCode(root.currency, 'currency')
     : string(root.currency, 'currency')
   const rawPoints = array(root.costPoints, 'costPoints')
-  const rawDonations = root.donations === undefined ? [] : array(root.donations, 'donations')
-  const rawKnownUsers = root.knownUsers === undefined ? [] : array(root.knownUsers, 'knownUsers')
 
   const categoryIcons: Record<string, string> = Object.create(null)
   if (root.categoryIcons !== undefined) {
@@ -537,65 +404,26 @@ function normalizeCostFile(value: unknown, strict = true): CostFile {
     }
   })
 
-  const donations = rawDonations.map((value, index): Donation => {
-    const path = `donations[${index}]`
-    const donation = record(value, path)
-    if (strict) {
-      knownKeys(donation, path, [
-        'id',
-        'name',
-        'amountCents',
-        'cadence',
-        'receivedOn',
-        'endsOn',
-        'status',
-        'submittedBy',
-        'userId',
-      ])
-    }
-    const input = normalizeDonationInput(donation, path, strict)
-    const status = donation.status === undefined
-      ? 'confirmed'
-      : string(donation.status, `donations[${index}].status`)
-    if (status !== 'confirmed' && status !== 'pending') {
-      throw new StoreValidationError(`donations[${index}].status is invalid`)
-    }
-    return {
-      ...input,
-      id: integer(donation.id, `donations[${index}].id`, 1),
-      status,
-      submittedBy: nullableString(
-        donation.submittedBy,
-        `donations[${index}].submittedBy`,
-      ),
-    }
-  })
+  const income = schemaVersion === 1
+    ? migrateLegacyDonations(root.donations, 'donations', strict)
+    : array(root.income, 'income').map((value, index): IncomeEntry => {
+      const path = `income[${index}]`
+      const entry = record(value, path)
+      if (strict) knownKeys(entry, path, ['id', 'month', 'amountCents', 'note'])
+      return {
+        ...normalizeIncomeInput(entry, path, strict),
+        id: integer(entry.id, `income[${index}].id`, 1),
+      }
+    })
+  if (schemaVersion === 1 && strict) {
+    validateLegacyKnownUsers(root.knownUsers, 'knownUsers')
+  }
 
-  const knownUsers = rawKnownUsers.map((value, index): KnownUser => {
-    const path = `knownUsers[${index}]`
-    const user = record(value, path)
-    if (strict) knownKeys(user, path, ['id', 'name', 'lastSeenAt', 'archived'])
-    return {
-      id: string(user.id, `knownUsers[${index}].id`),
-      name: string(user.name, `knownUsers[${index}].name`),
-      lastSeenAt: user.lastSeenAt === undefined
-        ? new Date().toISOString()
-        : strict
-        ? timestamp(user.lastSeenAt, `knownUsers[${index}].lastSeenAt`)
-        : typeof user.lastSeenAt === 'string'
-        ? user.lastSeenAt
-        : new Date().toISOString(),
-      archived: strict
-        ? optionalBoolean(user.archived, `knownUsers[${index}].archived`, false)
-        : user.archived === true,
-    }
-  })
-  uniqueStrings(knownUsers, 'knownUsers')
+  uniqueIds(income, 'income')
   uniqueIds(costPoints, 'costPoints')
-  uniqueIds(donations, 'donations')
 
   const normalized = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     currency,
     exportedAt: root.exportedAt === undefined
       ? new Date().toISOString()
@@ -605,8 +433,7 @@ function normalizeCostFile(value: unknown, strict = true): CostFile {
       ? root.exportedAt
       : new Date().toISOString(),
     costPoints,
-    donations,
-    knownUsers,
+    income,
     categoryIcons,
   }
   try {
@@ -730,60 +557,141 @@ function normalizePriceChanges(value: unknown, path: string, strict: boolean): P
   return changes
 }
 
-function normalizeDonationInput(value: unknown, path: string, strict = true): DonationInput {
+function normalizeIncomeInput(value: unknown, path: string, strict = true): IncomeInput {
+  const entry = record(value, path)
+  const incomeMonth = month(entry.month, `${path}.month`)
+  if (strict && incomeMonth < '1970-01') {
+    throw new StoreValidationError(`${path}.month must not be before 1970`)
+  }
+  return {
+    month: incomeMonth,
+    amountCents: integer(entry.amountCents, `${path}.amountCents`, 1),
+    note: nullableString(entry.note, `${path}.note`),
+  }
+}
+
+/**
+ * Schema v1 donations become income entries: one entry per calendar month the
+ * donation counted, capped at the current month — money received until now,
+ * never forecasts. Pending donations were never counted and are dropped; the
+ * donor name survives as the entry note.
+ */
+function migrateLegacyDonations(value: unknown, path: string, strict: boolean): IncomeEntry[] {
+  if (value === undefined || value === null) return []
+  const entries: IncomeEntry[] = []
+  const donationIds = new Set<number>()
+  const currentMonth = new Date().toISOString().slice(0, 7)
+  for (const [index, raw] of array(value, path).entries()) {
+    const donationPath = `${path}[${index}]`
+    const donationRecord = record(raw, donationPath)
+    if (strict) {
+      knownKeys(donationRecord, donationPath, [
+        'id',
+        'name',
+        'amountCents',
+        'cadence',
+        'receivedOn',
+        'endsOn',
+        'status',
+        'submittedBy',
+        'userId',
+      ])
+      const id = integer(donationRecord.id, `${donationPath}.id`, 1)
+      if (donationIds.has(id)) {
+        throw new StoreValidationError(`${path} contains duplicate id ${id}`)
+      }
+      donationIds.add(id)
+    }
+    // Disk loading stays lenient because files from early releases omitted
+    // fields and carried fields that no longer affect the converted income.
+    const donation = normalizeLegacyDonation(donationRecord, donationPath)
+    if (strict) {
+      if (donation.receivedOn < '1970-01-01') {
+        throw new StoreValidationError(`${donationPath}.receivedOn must not be before 1970`)
+      }
+      if (donation.endsOn !== null && donation.endsOn < donation.receivedOn) {
+        throw new StoreValidationError(`${donationPath}.endsOn must be on or after receivedOn`)
+      }
+      if (donation.cadence === 'one_time' && donation.endsOn !== null) {
+        throw new StoreValidationError(`${donationPath}.endsOn must be null for one_time cadence`)
+      }
+      nullableString(donationRecord.submittedBy, `${donationPath}.submittedBy`)
+      nullableString(donationRecord.userId, `${donationPath}.userId`)
+    }
+    if (donation.status === 'pending') continue
+    const endMonth = donation.endsOn?.slice(0, 7) ?? currentMonth
+    const lastMonth = endMonth < currentMonth ? endMonth : currentMonth
+    for (let entryMonth = donation.receivedOn.slice(0, 7); entryMonth <= lastMonth;) {
+      if (legacyDonationCentsForMonth(donation, entryMonth) > 0) {
+        entries.push({
+          id: entries.length + 1,
+          month: entryMonth,
+          amountCents: donation.amountCents,
+          note: donation.name,
+        })
+      }
+      entryMonth = nextMonth(entryMonth)
+    }
+  }
+  return entries
+}
+
+function validateLegacyKnownUsers(value: unknown, path: string): void {
+  if (value === undefined || value === null) return
+  const ids = new Set<string>()
+  for (const [index, raw] of array(value, path).entries()) {
+    const userPath = `${path}[${index}]`
+    const user = record(raw, userPath)
+    knownKeys(user, userPath, ['id', 'name', 'lastSeenAt', 'archived'])
+    const id = string(user.id, `${userPath}.id`)
+    string(user.name, `${userPath}.name`)
+    if (user.lastSeenAt !== undefined) timestamp(user.lastSeenAt, `${userPath}.lastSeenAt`)
+    if (user.archived !== undefined && typeof user.archived !== 'boolean') {
+      throw new StoreValidationError(`${userPath}.archived must be a boolean`)
+    }
+    if (ids.has(id)) throw new StoreValidationError(`${path} contains duplicate id ${id}`)
+    ids.add(id)
+  }
+}
+
+function normalizeLegacyDonation(value: unknown, path: string): LegacyDonation {
   const donation = record(value, path)
-  const name = string(donation.name, `${path}.name`)
-  const amountCents = integer(donation.amountCents, `${path}.amountCents`, 1)
   const cadence = donation.cadence === undefined
     ? 'one_time'
     : string(donation.cadence, `${path}.cadence`)
   if (cadence !== 'one_time' && cadence !== 'monthly' && cadence !== 'yearly') {
     throw new StoreValidationError(`${path}.cadence is invalid`)
   }
-
-  const receivedOn = date(donation.receivedOn, `${path}.receivedOn`)
-  const endsOn = nullableDate(donation.endsOn, `${path}.endsOn`)
-  if (strict && receivedOn < '1970-01-01') {
-    throw new StoreValidationError(`${path}.receivedOn must not be before 1970`)
+  const status = donation.status === undefined
+    ? 'confirmed'
+    : string(donation.status, `${path}.status`)
+  if (status !== 'confirmed' && status !== 'pending') {
+    throw new StoreValidationError(`${path}.status is invalid`)
   }
-  if (strict && endsOn !== null && endsOn < receivedOn) {
-    throw new StoreValidationError(`${path}.endsOn must be on or after ${path}.receivedOn`)
-  }
-  if (strict && cadence === 'one_time' && endsOn !== null) {
-    throw new StoreValidationError(`${path}.endsOn must be null for one_time cadence`)
-  }
-
   return {
-    name,
-    amountCents,
+    name: string(donation.name, `${path}.name`),
+    amountCents: integer(donation.amountCents, `${path}.amountCents`, 1),
     cadence,
-    receivedOn,
-    endsOn,
-    userId: nullableString(donation.userId, `${path}.userId`),
+    receivedOn: date(donation.receivedOn, `${path}.receivedOn`),
+    endsOn: nullableDate(donation.endsOn, `${path}.endsOn`),
+    status,
   }
 }
 
-function normalizeUserSightings(
-  value: unknown,
-  path: string,
-): Array<{ id: string; name: string }> {
-  const users = array(value, path).map((user, index) =>
-    normalizeUserSighting(user, `${path}[${index}]`)
-  )
-  const ids = new Set<string>()
-  for (const user of users) {
-    if (ids.has(user.id)) throw new StoreValidationError(`${path} contains duplicate id ${user.id}`)
-    ids.add(user.id)
-  }
-  return users
+/** The amount a legacy donation counted for in a month, mirroring the retired cadence rules. */
+function legacyDonationCentsForMonth(donation: LegacyDonation, month: string): number {
+  const startMonth = donation.receivedOn.slice(0, 7)
+  const endMonth = donation.endsOn?.slice(0, 7) ?? null
+  if (month < startMonth || (endMonth && month > endMonth)) return 0
+  if (donation.cadence === 'one_time') return month === startMonth ? donation.amountCents : 0
+  if (donation.cadence === 'monthly') return donation.amountCents
+  return month.slice(5, 7) === startMonth.slice(5, 7) ? donation.amountCents : 0
 }
 
-function normalizeUserSighting(value: unknown, path: string): { id: string; name: string } {
-  const user = record(value, path)
-  return {
-    id: string(user.id, `${path}.id`),
-    name: string(user.name, `${path}.name`),
-  }
+function nextMonth(month: string): string {
+  const year = Number(month.slice(0, 4))
+  const index = Number(month.slice(5, 7))
+  return index === 12 ? `${year + 1}-01` : `${year}-${String(index + 1).padStart(2, '0')}`
 }
 
 function record(value: unknown, path: string): Record<string, unknown> {
@@ -860,6 +768,14 @@ function nullableDate(value: unknown, path: string): string | null {
   return date(value, path)
 }
 
+function month(value: unknown, path: string): string {
+  const iso = string(value, path)
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(iso)) {
+    throw new StoreValidationError(`${path} must be YYYY-MM`)
+  }
+  return iso
+}
+
 function timestamp(value: unknown, path: string): string {
   const iso = string(value, path)
   if (!/^\d{4}-\d{2}-\d{2}T/.test(iso) || !Number.isFinite(Date.parse(iso))) {
@@ -890,24 +806,8 @@ function currencyCode(value: unknown, path: string): string {
   return code
 }
 
-function optionalBoolean(value: unknown, path: string, fallback: boolean): boolean {
-  if (value === undefined) return fallback
-  if (typeof value !== 'boolean') throw new StoreValidationError(`${path} must be a boolean`)
-  return value
-}
-
 function uniqueIds(values: Array<{ id: number }>, path: string): void {
   const ids = new Set<number>()
-  for (const value of values) {
-    if (ids.has(value.id)) {
-      throw new StoreValidationError(`${path} contains duplicate id ${value.id}`)
-    }
-    ids.add(value.id)
-  }
-}
-
-function uniqueStrings(values: Array<{ id: string }>, path: string): void {
-  const ids = new Set<string>()
   for (const value of values) {
     if (ids.has(value.id)) {
       throw new StoreValidationError(`${path} contains duplicate id ${value.id}`)

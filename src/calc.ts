@@ -1,4 +1,4 @@
-import type { CostPoint, Donation } from '../shared/types.ts'
+import type { CostPoint, IncomeEntry } from '../shared/types.ts'
 
 function utcMonth(date: Date): string {
   return date.toISOString().slice(0, 7)
@@ -108,17 +108,7 @@ export function amortizationElapsed(p: CostPoint, now: Date = new Date()): numbe
   return Math.min(monthOffset(startMonth, month) + 1, duration)
 }
 
-/** Donation amount occurring in a calendar month (YYYY-MM). */
-export function donationCentsForMonth(donation: Donation, month: string): number {
-  if (donation.status === 'pending') return 0
-  const startMonth = donation.receivedOn.slice(0, 7)
-  const endMonth = donation.endsOn?.slice(0, 7) ?? null
-  if (month < startMonth || (endMonth && month > endMonth)) return 0
-
-  if (donation.cadence === 'one_time') {
-    return month === startMonth ? donation.amountCents : 0
-  }
-  if (donation.cadence === 'monthly') return donation.amountCents
-
-  return month.slice(5, 7) === startMonth.slice(5, 7) ? donation.amountCents : 0
+/** Income booked for a calendar month (YYYY-MM): the sum of that month's entries. */
+export function incomeCentsForMonth(entries: IncomeEntry[], month: string): number {
+  return entries.reduce((sum, entry) => sum + (entry.month === month ? entry.amountCents : 0), 0)
 }

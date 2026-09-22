@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert'
-import type { CostPoint, Donation } from '../shared/types.ts'
+import type { CostPoint, IncomeEntry } from '../shared/types.ts'
 import { buildCoverage, buildTimeline } from './summary.ts'
 
 function cost(overrides: Partial<CostPoint> = {}): CostPoint {
@@ -19,17 +19,12 @@ function cost(overrides: Partial<CostPoint> = {}): CostPoint {
   }
 }
 
-function donation(overrides: Partial<Donation> = {}): Donation {
+function income(overrides: Partial<IncomeEntry> = {}): IncomeEntry {
   return {
     id: 1,
-    name: 'Alex',
+    month: '2026-06',
     amountCents: 500,
-    cadence: 'one_time',
-    receivedOn: '2026-07-01',
-    endsOn: null,
-    status: 'confirmed',
-    submittedBy: null,
-    userId: null,
+    note: null,
     ...overrides,
   }
 }
@@ -63,24 +58,45 @@ Deno.test('timeline includes current month before future-only entries', () => {
   assert.equal(timeline.find((entry) => entry.month === '2026-10')?.totalCents, 1200)
 })
 
-Deno.test('pending donations do not alter financial history or coverage', () => {
+Deno.test('timeline carries booked income per month', () => {
+  const timeline = buildTimeline(
+    [cost({ startsOn: '2026-01-01' })],
+    [income(), income({ id: 2, month: '2026-07', amountCents: 250 })],
+    new Date('2026-07-20T12:00:00Z'),
+  )
+
+  assert.equal(timeline.find((entry) => entry.month === '2026-05')?.incomeCents, 0)
+  assert.equal(timeline.find((entry) => entry.month === '2026-06')?.incomeCents, 500)
+  assert.equal(timeline.find((entry) => entry.month === '2026-07')?.incomeCents, 250)
+})
+
+Deno.test('coverage totals run since the first income month through the current month', () => {
   const now = new Date('2026-07-20T12:00:00Z')
   const costs = [cost({ startsOn: '2026-01-01' })]
-  const confirmed = donation({ receivedOn: '2026-06-01' })
-  const pending = donation({
-    id: 2,
-    receivedOn: '2025-01-01',
-    status: 'pending',
-    submittedBy: 'Sam',
-  })
+  const entries = [
+    income(),
+    income({ id: 2, month: '2026-07', amountCents: 250 }),
+    // booked ahead — money not received "until now"
+    income({ id: 3, month: '2026-08', amountCents: 9_999 }),
+  ]
+  const coverage = buildCoverage(buildTimeline(costs, entries, now), entries, now)
 
-  const withoutPending = buildTimeline(costs, [confirmed], now)
-  const withPending = buildTimeline(costs, [pending, confirmed], now)
-  assert.deepEqual(withPending, withoutPending)
-  assert.deepEqual(
-    buildCoverage(withPending, [pending, confirmed], now),
-    buildCoverage(withoutPending, [confirmed], now),
-  )
+  assert.equal(coverage.month, '2026-07')
+  assert.equal(coverage.costCents, 1200)
+  assert.equal(coverage.incomeCents, 250)
+  assert.equal(coverage.balanceCents, -950)
+  // cost-only months 2026-01..2026-05 stay out of the pot
+  assert.equal(coverage.totalIncomeCents, 750)
+  assert.equal(coverage.totalCostCents, 2400)
+  assert.equal(coverage.totalBalanceCents, -1650)
+})
+
+Deno.test('coverage without income stays at zero', () => {
+  const now = new Date('2026-07-20T12:00:00Z')
+  const coverage = buildCoverage(buildTimeline([cost()], [], now), [], now)
+  assert.equal(coverage.totalIncomeCents, 0)
+  assert.equal(coverage.totalCostCents, 0)
+  assert.equal(coverage.totalBalanceCents, 0)
 })
 
 Deno.test('calendar amortization occupies exactly its configured month buckets', () => {

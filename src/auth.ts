@@ -23,8 +23,6 @@ const AuthenticationResponseSchema = Type.Object({
   User: JellyfinUserResponseSchema,
 }, { additionalProperties: true })
 
-const UsersResponseSchema = Type.Array(JellyfinUserResponseSchema)
-
 export type JellyfinFetch = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -106,10 +104,6 @@ function parseAuthentication(value: unknown): { token: string; user: JellyfinUse
   return { token: session.AccessToken, user: parseUser(session.User) }
 }
 
-function parseUsers(value: unknown): JellyfinUser[] {
-  return decode(UsersResponseSchema, value).map(parseUser)
-}
-
 export class Jellyfin {
   #base: string
   #fetcher: JellyfinFetch
@@ -184,18 +178,6 @@ export class Jellyfin {
     }
     void request.then(clearPending, clearPending)
     return request
-  }
-
-  /**
-   * Lists all users on the server. Requires an admin token — Jellyfin
-   * restricts /Users to administrators.
-   */
-  async users(token: string): Promise<JellyfinUser[]> {
-    const res = await this.#request('/Users', 'user list', {
-      headers: { authorization: tokenAuthorization(token) },
-    })
-    if (!res.ok) await this.#throwForStatus(res, 'user list')
-    return await this.#readJson(res, 'user list', parseUsers)
   }
 
   /** Invalidates the session on the Jellyfin side (best effort). */

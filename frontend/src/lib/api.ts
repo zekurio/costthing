@@ -33,7 +33,7 @@ type SuccessApp = PickResponseByStatusCode<AppType, 200 | 201 | 204>
 const client = hc<SuccessApp>('/', { fetch: checkedFetch })
 
 type CostSaveInput = InferRequestType<typeof client.api.costs.$post>['json']
-type DonationSaveInput = InferRequestType<typeof client.api.donations.$post>['json']
+type IncomeSaveInput = InferRequestType<typeof client.api.income.$post>['json']
 
 function randomDeviceId(): string {
   try {
@@ -77,24 +77,16 @@ export const api = {
   remove: async (id: number) => {
     await client.api.costs[':id'].$delete({ param: { id: String(id) } })
   },
-  createDonation: async (input: DonationSaveInput) =>
-    (await client.api.donations.$post({ json: input })).json(),
-  submitDonation: async (input: DonationSaveInput) =>
-    (await client.api.donations.submit.$post({ json: input })).json(),
-  confirmDonation: async (id: number) =>
-    (await client.api.donations[':id'].confirm.$post({
-      param: { id: String(id) },
-    })).json(),
-  updateDonation: async (id: number, input: DonationSaveInput) =>
-    (await client.api.donations[':id'].$put({
+  createIncome: async (input: IncomeSaveInput) =>
+    (await client.api.income.$post({ json: input })).json(),
+  updateIncome: async (id: number, input: IncomeSaveInput) =>
+    (await client.api.income[':id'].$put({
       param: { id: String(id) },
       json: input,
     })).json(),
-  removeDonation: async (id: number) => {
-    await client.api.donations[':id'].$delete({ param: { id: String(id) } })
+  removeIncome: async (id: number) => {
+    await client.api.income[':id'].$delete({ param: { id: String(id) } })
   },
-  /** Admin only: Jellyfin users including archived server accounts. */
-  users: async () => (await client.api.users.$get()).json(),
   exportJson: async () => (await client.api.export.$get()).json(),
   importJson: async (data: unknown) =>
     (await client.api.import.$post({ json: data })).json(),

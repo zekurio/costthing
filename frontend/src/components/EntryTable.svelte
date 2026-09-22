@@ -1,5 +1,4 @@
 <script lang="ts">
-  import Check from 'lucide-svelte/icons/check'
   import HandHeart from 'lucide-svelte/icons/hand-heart'
   import Pencil from 'lucide-svelte/icons/pencil'
   import Scissors from 'lucide-svelte/icons/scissors'
@@ -9,11 +8,10 @@
   import Select from './Select.svelte'
   import { api, ApiError } from '../lib/api.ts'
   import type { ConfirmAction, ConfirmDialogState } from '../lib/dialog.ts'
-  import { costInput, donationInput } from '../lib/entries.ts'
+  import { costInput } from '../lib/entries.ts'
   import { costIcon } from '../lib/icons.ts'
   import {
     artLabel,
-    cadenceLabel,
     categoryColor,
     categoryTextColor,
     cents,
@@ -24,56 +22,42 @@
   import type {
     CostSaveInput,
     Coverage,
-    Donation,
-    DonationInput,
-    KnownUser,
+    IncomeEntry,
+    IncomeInput,
     SummaryPoint,
   } from '../../../shared/types.ts'
 
   interface Props {
     points: SummaryPoint[]
-    donations: Donation[]
+    income: IncomeEntry[]
     categoryIcons: Record<string, string>
     coverage: Coverage
     fmt: Intl.NumberFormat
     admin: boolean
-    /** admin only: Jellyfin users (incl. archived) for linking donations */
-    knownUsers?: KnownUser[]
-    /** logged-in user's name — prefills self-submitted donations */
-    meName: string
     onchanged: () => Promise<void>
     onadminerror: (err: unknown) => void
   }
 
   let {
     points,
-    donations,
+    income,
     categoryIcons,
     coverage,
     fmt,
     admin,
-    knownUsers = [],
-    meName,
     onchanged,
     onadminerror,
   }: Props = $props()
 
-  /** resolves a donation's linked Jellyfin user from the archive */
-  function linkedUser(d: Donation): KnownUser | null {
-    if (!d.userId) return null
-    return knownUsers.find((u) => u.id === d.userId) ?? null
-  }
-
-  type Entry = { kind: 'cost'; cost: SummaryPoint } | { kind: 'donation'; donation: Donation }
+  type Entry = { kind: 'cost'; cost: SummaryPoint } | { kind: 'income'; income: IncomeEntry }
 
   let query = $state('')
-  let filterType = $state<'all' | 'costs' | 'donations'>('all')
+  let filterType = $state<'all' | 'costs' | 'income'>('all')
   let filterCategory = $state('all')
   let filterCadence = $state<'all' | 'recurring' | 'one_time' | 'cancelled'>('all')
   let sortBy = $state<'date' | 'name' | 'amount'>('date')
 
-  // 'submit' = non-admin reporting a donation for themselves (pending until confirmed)
-  let editing = $state<Entry | 'new' | 'submit' | null>(null)
+  let editing = $state<Entry | 'new' | null>(null)
   let EntryForm = $state<typeof EntryFormComponent | null>(null)
   let operationError = $state('')
   let reloadNeeded = $state(false)
@@ -90,8 +74,6 @@
       reloadNeeded = true
     }
   }
-
-  const pendingCount = $derived(donations.filter((d) => d.status === 'pending').length)
 
   const existingCategories = $derived(
     [...new Set(points.map((p) => p.category))].sort((a, b) => a.localeCompare(b, 'de')),
@@ -124,28 +106,27 @@
     return true
   }
 
-  function donationVisible(d: Donation, q: string): boolean {
-    // category is cost-specific; cadence applies to both entry types
-    if (filterType === 'all' && filterCategory !== 'all') return false
-    if (filterCadence === 'one_time' && d.cadence !== 'one_time') return false
-    if (filterCadence === 'recurring' && (d.cadence === 'one_time' || d.endsOn)) return false
-    if (filterCadence === 'cancelled' && !d.endsOn) return false
-    if (q && !d.name.toLowerCase().includes(q)) return false
+  function incomeVisible(entry: IncomeEntry, q: string): boolean {
+    // Category and cadence describe costs, so selecting either excludes income.
+    if (filterType === 'all' && (filterCategory !== 'all' || filterCadence !== 'all')) return false
+    if (q && !entry.note?.toLowerCase().includes(q)) return false
     return true
   }
 
   const visibleEntries = $derived.by<Entry[]>(() => {
     const q = query.trim().toLowerCase()
     let list: Entry[] = []
-    if (filterType !== 'donations') {
+    if (filterType !== 'income') {
       for (const p of points) if (costVisible(p, q)) list.push({ kind: 'cost', cost: p })
     }
     if (filterType !== 'costs') {
-      for (const d of donations) if (donationVisible(d, q)) list.push({ kind: 'donation', donation: d })
+      for (const entry of income) {
+        if (incomeVisible(entry, q)) list.push({ kind: 'income', income: entry })
+      }
     }
-    const dateOf = (e: Entry) => (e.kind === 'cost' ? e.cost.startsOn : e.donation.receivedOn)
-    const nameOf = (e: Entry) => (e.kind === 'cost' ? e.cost.name : e.donation.name)
-    const amountOf = (e: Entry) => (e.kind === 'cost' ? e.cost.monthlyCents : e.donation.amountCents)
+    const dateOf = (e: Entry) => (e.kind === 'cost' ? e.cost.startsOn : e.income.month)
+    const nameOf = (e: Entry) => (e.kind === 'cost' ? e.cost.name : e.income.note ?? '')
+    const amountOf = (e: Entry) => (e.kind === 'cost' ? e.cost.monthlyCents : e.income.amountCents)
     switch (sortBy) {
       case 'name':
         list = [...list].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'de'))
@@ -178,7 +159,7 @@
   async function saveCost(input: CostSaveInput) {
     if (!admin || !editing) return
     try {
-      if (editing !== 'new' && editing !== 'submit' && editing.kind === 'cost') {
+      if (editing !== 'new' && editing.kind === 'cost') {
         await api.update(editing.cost.id, input)
       } else {
         await api.create(input)
@@ -252,17 +233,15 @@
     }
   }
 
-  // ---- donation CRUD ----
+  // ---- income CRUD ----
 
-  async function saveDonation(input: DonationInput) {
-    if (!editing) return
+  async function saveIncome(input: IncomeInput) {
+    if (!admin || !editing) return
     try {
-      if (editing === 'submit') {
-        await api.submitDonation(input)
-      } else if (editing !== 'new' && editing.kind === 'donation') {
-        await api.updateDonation(editing.donation.id, input)
+      if (editing !== 'new' && editing.kind === 'income') {
+        await api.updateIncome(editing.income.id, input)
       } else {
-        await api.createDonation(input)
+        await api.createIncome(input)
       }
       editing = null
       await onchanged()
@@ -272,71 +251,22 @@
     }
   }
 
-  async function confirmDonation(donation: Donation) {
-    if (!admin) return
-    try {
-      await api.confirmDonation(donation.id)
-      await onchanged()
-    } catch (err) {
-      reportOperationError(err)
-    }
-  }
-
-  function askRemoveDonation(donation: Donation) {
-    if (!admin) return
-    const stillActive = donation.cadence !== 'one_time' && !donation.endsOn
-    const actions: ConfirmAction[] = []
-    if (stillActive) {
-      actions.push({
-        label: 'Stattdessen beenden',
-        kind: 'primary',
-        run: () => void doCancelDonation(donation),
-      })
-    }
-    actions.push(
-      { label: 'Endgültig löschen', kind: 'danger', run: () => void doRemoveDonation(donation) },
-      { label: 'Abbrechen', kind: 'ghost', run: () => {} },
-    )
-    confirmDialog = {
-      title: 'Spende löschen?',
-      body: stillActive
-        ? `„${donation.name}“ läuft noch. Löschen entfernt die Spende rückwirkend aus dem gesamten Verlauf – beenden erhält die Historie.`
-        : `„${donation.name}“ (${cents(fmt, donation.amountCents)}, ${formatDate(donation.receivedOn)}) wird rückwirkend entfernt.`,
-      actions,
-    }
-  }
-
-  function askCancelDonation(donation: Donation) {
+  function askRemoveIncome(entry: IncomeEntry) {
     if (!admin) return
     confirmDialog = {
-      title: `„${donation.name}“ beenden?`,
-      body:
-        `Ende = heute (${formatDate(new Date().toISOString().slice(0, 10))}). ` +
-        'Die Spende zählt noch für den laufenden Monat und bleibt danach im Verlauf erhalten.',
+      title: 'Einnahme löschen?',
+      body: `${cents(fmt, entry.amountCents)} für ${formatMonthYear(entry.month)} werden rückwirkend entfernt.`,
       actions: [
-        { label: 'Beenden', kind: 'primary', run: () => void doCancelDonation(donation) },
+        { label: 'Endgültig löschen', kind: 'danger', run: () => void doRemoveIncome(entry) },
         { label: 'Abbrechen', kind: 'ghost', run: () => {} },
       ],
     }
   }
 
-  async function doCancelDonation(donation: Donation) {
+  async function doRemoveIncome(entry: IncomeEntry) {
     if (!admin) return
     try {
-      await api.updateDonation(donation.id, {
-        ...donationInput(donation),
-        endsOn: new Date().toISOString().slice(0, 10),
-      })
-      await onchanged()
-    } catch (err) {
-      reportOperationError(err)
-    }
-  }
-
-  async function doRemoveDonation(donation: Donation) {
-    if (!admin) return
-    try {
-      await api.removeDonation(donation.id)
+      await api.removeIncome(entry.id)
       await onchanged()
     } catch (err) {
       reportOperationError(err)
@@ -349,24 +279,17 @@
   <div class="section-head">
     <h2 class="section-title">Alle Einträge</h2>
     <div class="section-meta">
-      <span class="muted">{visibleEntries.length} von {points.length + donations.length}</span>
-      {#if donations.length > 0}
-        <span class="muted" title="aufsummierte Monatsbilanzen seit der ersten erfassten Spende">
+      <span class="muted">{visibleEntries.length} von {points.length + income.length}</span>
+      {#if income.length > 0}
+        <span class="muted" title="Einnahmen abzüglich Kosten seit der ersten erfassten Einnahme">
           Gesamtsaldo
-          <span class={coverage.cumulativeBalanceCents >= 0 ? 'ok' : 'deficit'}>
-            {signedCents(fmt, coverage.cumulativeBalanceCents)}
+          <span class={coverage.totalBalanceCents >= 0 ? 'ok' : 'deficit'}>
+            {signedCents(fmt, coverage.totalBalanceCents)}
           </span>
-        </span>
-      {/if}
-      {#if admin && pendingCount > 0}
-        <span class="pending-count" title="wartet auf Bestätigung">
-          {pendingCount} ausstehend
         </span>
       {/if}
       {#if admin}
         <button class="add-entry" onclick={() => void openEditor('new')}>+ Eintrag hinzufügen</button>
-      {:else}
-        <button class="add-entry" onclick={() => void openEditor('submit')}>+ Spende melden</button>
       {/if}
     </div>
   </div>
@@ -405,21 +328,27 @@
         Kosten
       </button>
       <button
-        class:active={filterType === 'donations'}
-        aria-pressed={filterType === 'donations'}
-        onclick={() => (filterType = 'donations')}
+        class:active={filterType === 'income'}
+        aria-pressed={filterType === 'income'}
+        onclick={() => (filterType = 'income')}
       >
-        Spenden
+        Einnahmen
       </button>
     </div>
     <Select
       bind:value={filterCategory}
       options={categoryOptions}
-      disabled={filterType === 'donations'}
-      title={filterType === 'donations' ? 'Kategorien gelten nur für Kosten' : ''}
+      disabled={filterType === 'income'}
+      title={filterType === 'income' ? 'Kategorien gelten nur für Kosten' : ''}
       ariaLabel="Kategorie filtern"
     />
-    <Select bind:value={filterCadence} options={[...cadenceOptions]} ariaLabel="Rhythmus filtern" />
+    <Select
+      bind:value={filterCadence}
+      options={[...cadenceOptions]}
+      disabled={filterType === 'income'}
+      title={filterType === 'income' ? 'Rhythmen gelten nur für Kosten' : ''}
+      ariaLabel="Rhythmus filtern"
+    />
     <Select bind:value={sortBy} options={[...sortOptions]} ariaLabel="Einträge sortieren" />
   </div>
 
@@ -432,11 +361,8 @@
   </div>
 
   <ul class="rows">
-    {#each visibleEntries as e (e.kind === 'cost' ? `c${e.cost.id}` : `d${e.donation.id}`)}
-      {@const cancelled = e.kind === 'cost'
-        ? e.cost.endsOn !== null && e.cost.monthlyCents === 0
-        : e.donation.endsOn !== null &&
-          e.donation.endsOn.slice(0, 7) < new Date().toISOString().slice(0, 7)}
+    {#each visibleEntries as e (e.kind === 'cost' ? `c${e.cost.id}` : `i${e.income.id}`)}
+      {@const cancelled = e.kind === 'cost' && e.cost.endsOn !== null && e.cost.monthlyCents === 0}
       <li class="table-grid row" class:admin class:cancelled>
         {#if e.kind === 'cost'}
           {@const p = e.cost}
@@ -499,79 +425,35 @@
             </span>
           {/if}
         {:else}
-          {@const d = e.donation}
+          {@const entry = e.income}
           <div class="cell-posten">
-            <span class="letter-tile donation-tile" class:pending-tile={d.status === 'pending'}>
+            <span class="letter-tile income-tile">
               <HandHeart size={18} />
             </span>
             <div>
-              <div class="row-name">
-                {d.name}
-                {#if d.status === 'pending'}
-                  <span class="pending-badge" title={d.submittedBy ? `gemeldet von ${d.submittedBy}` : 'wartet auf Bestätigung'}>ausstehend</span>
-                {/if}
-              </div>
-              <div class="row-cat muted">
-                Spende{d.status === 'pending' && d.submittedBy ? ` · von ${d.submittedBy}` : ''}
-                {#if admin && linkedUser(d)}
-                  {@const u = linkedUser(d)!}
-                  <span
-                    class="user-badge"
-                    class:archived={u.archived}
-                    title={u.archived
-                      ? 'Jellyfin-Konto existiert nicht mehr — archiviert'
-                      : 'verknüpftes Jellyfin-Konto'}
-                  >
-                    {u.name}{u.archived ? ' †' : ''}
-                  </span>
-                {/if}
-              </div>
+              <div class="row-name">{entry.note ?? 'Einnahme'}</div>
+              <div class="row-cat muted">Einnahme</div>
             </div>
           </div>
-          <span class="cell muted col-art">
-            {cadenceLabel({
-              cadence: d.cadence,
-              intervalCount: null,
-              intervalUnit: null,
-            })}{d.endsOn ? ` · bis ${formatMonthYear(d.endsOn)}` : ''}
-          </span>
-          <span class="cell muted col-date">{formatDate(d.receivedOn)}</span>
+          <span class="cell muted col-art">einmalig</span>
+          <span class="cell muted col-date">{formatMonthYear(entry.month)}</span>
           <span class="cell row-amount">
-            <span class="amount-main donation-amount">{cents(fmt, d.amountCents)}</span>
+            <span class="amount-main income-amount">{cents(fmt, entry.amountCents)}</span>
           </span>
           {#if admin}
             <span class="cell row-admin">
-              {#if d.status === 'pending'}
-                <button
-                  class="confirm"
-                  onclick={() => confirmDonation(d)}
-                  title="Spende bestätigen"
-                  aria-label={`Spende von ${d.name} bestätigen`}
-                >
-                  <Check size={16} />
-                </button>
-              {/if}
-              {#if d.cadence !== 'one_time' && !d.endsOn}
-                <button
-                  onclick={() => askCancelDonation(d)}
-                  title="beenden (Ende = heute)"
-                  aria-label={`Spende von ${d.name} beenden`}
-                >
-                  <Scissors size={15} />
-                </button>
-              {/if}
               <button
-                onclick={() => void openEditor({ kind: 'donation', donation: d })}
+                onclick={() => void openEditor({ kind: 'income', income: entry })}
                 title="bearbeiten"
-                aria-label={`Spende von ${d.name} bearbeiten`}
+                aria-label="Einnahme bearbeiten"
               >
                 <Pencil size={15} />
               </button>
               <button
                 class="danger"
-                onclick={() => askRemoveDonation(d)}
+                onclick={() => askRemoveIncome(entry)}
                 title="löschen"
-                aria-label={`Spende von ${d.name} löschen`}
+                aria-label="Einnahme löschen"
               >
                 <X size={16} />
               </button>
@@ -587,19 +469,16 @@
 
 {#if editing && EntryForm}
   <EntryForm
-    initial={editing === 'new' || editing === 'submit'
+    initial={editing === 'new'
       ? null
       : editing.kind === 'cost'
         ? editing.cost
-        : editing.donation}
-    initialKind={editing === 'new' ? 'cost' : editing === 'submit' ? 'donation' : editing.kind}
-    donorOnly={editing === 'submit'}
-    defaultName={editing === 'submit' ? meName : ''}
-    {knownUsers}
+        : editing.income}
+    initialKind={editing === 'new' ? 'cost' : editing.kind}
     categories={existingCategories}
     {categoryIcons}
     onsaveCost={saveCost}
-    onsaveDonation={saveDonation}
+    onsaveIncome={saveIncome}
     onclose={() => (editing = null)}
   />
 {/if}
@@ -662,15 +541,6 @@
 
   .add-entry:hover {
     background: var(--accent-strong);
-  }
-
-  .pending-count {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--warn-strong);
-    background: color-mix(in srgb, var(--warn) 16%, transparent);
-    border-radius: 99px;
-    padding: 4px 12px;
   }
 
   /* ---- filters ---- */
@@ -797,27 +667,9 @@
     flex-shrink: 0;
   }
 
-  .donation-tile {
+  .income-tile {
     background: color-mix(in srgb, var(--ok) 18%, transparent);
     color: var(--ok-strong);
-  }
-
-  .pending-tile {
-    background: color-mix(in srgb, var(--warn) 18%, transparent);
-    color: var(--warn-strong);
-  }
-
-  .pending-badge {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--warn-strong);
-    background: color-mix(in srgb, var(--warn) 16%, transparent);
-    border-radius: 99px;
-    padding: 2px 8px;
-    margin-left: 6px;
-    vertical-align: middle;
   }
 
   .row-name {
@@ -828,22 +680,6 @@
   .row-cat {
     font-size: 13px;
     margin-top: 2px;
-  }
-
-  .user-badge {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--accent-strong);
-    background: var(--accent-soft);
-    border-radius: 99px;
-    padding: 2px 8px;
-    margin-left: 4px;
-    vertical-align: middle;
-  }
-
-  .user-badge.archived {
-    color: var(--muted);
-    background: var(--surface-2);
   }
 
   .cell {
@@ -865,7 +701,7 @@
     font-size: 12px;
   }
 
-  .donation-amount {
+  .income-amount {
     color: var(--ok-strong);
   }
 
@@ -891,11 +727,6 @@
   .row-admin .danger:hover {
     color: var(--danger-strong);
     background: color-mix(in srgb, var(--danger) 14%, transparent);
-  }
-
-  .row-admin .confirm:hover {
-    color: var(--ok-strong);
-    background: color-mix(in srgb, var(--ok) 16%, transparent);
   }
 
   .empty {

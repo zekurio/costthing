@@ -299,26 +299,6 @@ Deno.test('the user cache evicts old entries at its configured bound', async () 
   assert.equal(transport.calls.length, 4)
 })
 
-Deno.test('users sends modern token authorization and validates its response', async () => {
-  const transport = fakeFetch([
-    json([userDto('one', 'One', false, null), userDto('two', 'Two')]),
-    json({ Users: [] }),
-  ])
-  const jellyfin = new Jellyfin('https://jellyfin.example', { fetch: transport.fetch })
-
-  assert.deepEqual(await jellyfin.users('admin-token'), [
-    { id: 'one', name: 'One', isAdmin: false, avatarTag: null },
-    { id: 'two', name: 'Two', isAdmin: true, avatarTag: 'avatar-tag' },
-  ])
-  assert.equal(
-    headers(transport.calls[0]!).get('authorization'),
-    'MediaBrowser Token="admin-token"',
-  )
-  assert.equal(headers(transport.calls[0]!).has('x-emby-token'), false)
-
-  await expectJellyfinError(jellyfin.users('admin-token'), 'malformed-response')
-})
-
 Deno.test('logout sends token authorization, revokes the local cache, and is best effort', async () => {
   const transport = fakeFetch([
     json(userDto()),

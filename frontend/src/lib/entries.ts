@@ -1,7 +1,7 @@
 import type {
   CostSaveInput,
-  Donation,
-  DonationInput,
+  IncomeEntry,
+  IncomeInput,
   SummaryPoint,
 } from '../../../shared/types.ts'
 
@@ -21,13 +21,10 @@ export function costInput(point: SummaryPoint): CostSaveInput {
   }
 }
 
-export function donationInput(donation: Donation): DonationInput {
+export function incomeInput(income: IncomeEntry): IncomeInput {
   return {
-    name: donation.name,
-    amountCents: donation.amountCents,
-    cadence: donation.cadence,
-    receivedOn: donation.receivedOn,
-    endsOn: donation.endsOn,
-    userId: donation.userId,
+    month: income.month,
+    amountCents: income.amountCents,
+    note: income.note,
   }
 }

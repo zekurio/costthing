@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert'
 import { join } from 'node:path'
-import type { CostInput, DonationInput } from '../shared/types.ts'
+import type { CostInput, IncomeInput } from '../shared/types.ts'
 import { Store } from './store.ts'
 
 function costInput(overrides: Partial<CostInput> = {}): CostInput {
@@ -19,19 +19,34 @@ function costInput(overrides: Partial<CostInput> = {}): CostInput {
   }
 }
 
-function donationInput(overrides: Partial<DonationInput> = {}): DonationInput {
+function incomeInput(overrides: Partial<IncomeInput> = {}): IncomeInput {
   return {
-    name: 'Alex',
+    month: '2026-07',
     amountCents: 500,
-    cadence: 'one_time',
-    receivedOn: '2026-07-24',
-    endsOn: null,
-    userId: null,
+    note: null,
     ...overrides,
   }
 }
 
 function exportData() {
+  return {
+    schemaVersion: 2,
+    currency: 'EUR',
+    exportedAt: '2026-07-24T00:00:00.000Z',
+    costPoints: [],
+    income: [
+      {
+        id: 1,
+        month: '2026-07',
+        amountCents: 500,
+        note: 'Kasse',
+      },
+    ],
+  }
+}
+
+/** schema v1 file with donations, as written by the previous release */
+function legacyData() {
   return {
     schemaVersion: 1,
     currency: 'EUR',
@@ -42,9 +57,10 @@ function exportData() {
         id: 1,
         name: 'Legacy donation',
         amountCents: 500,
-        receivedOn: '2026-07-01',
+        receivedOn: '2020-07-01',
       },
     ],
+    knownUsers: [],
   }
 }
 
@@ -112,17 +128,122 @@ Deno.test('price changes are normalized, validated, and persist', async () => {
   }
 })
 
-Deno.test('imports an export and normalizes legacy donations', async () => {
+Deno.test('imports legacy exports and migrates donations to income', async () => {
   const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
   try {
     const dataFile = join(directory, 'costs.json')
     await Deno.writeTextFile(dataFile, JSON.stringify(exportData()))
     const store = await Store.load(dataFile)
 
-    const imported = await store.replaceFromImport(exportData())
-    assert.equal(imported.donations[0]?.cadence, 'one_time')
-    assert.equal(imported.donations[0]?.endsOn, null)
-    assert.equal(JSON.parse(await Deno.readTextFile(`${dataFile}.bak`)).donations.length, 1)
+    const imported = await store.replaceFromImport(legacyData())
+    assert.equal(imported.schemaVersion, 2)
+    assert.deepEqual(
+      imported.income.map((entry) => [entry.month, entry.amountCents, entry.note]),
+      [['2020-07', 500, 'Legacy donation']],
+    )
+    assert.equal(JSON.parse(await Deno.readTextFile(`${dataFile}.bak`)).income.length, 1)
+  } finally {
+    await Deno.remove(directory, { recursive: true })
+  }
+})
+
+Deno.test('legacy donations expand into one income entry per counted month', async () => {
+  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
+  try {
+    const dataFile = join(directory, 'costs.json')
+    await Deno.writeTextFile(
+      dataFile,
+      JSON.stringify({
+        ...legacyData(),
+        donations: [
+          {
+            id: 2,
+            name: 'Monatlich',
+            amountCents: 100,
+            cadence: 'monthly',
+            receivedOn: '2020-05-01',
+            endsOn: '2020-07-31',
+          },
+          {
+            id: 1,
+            name: 'Einmal',
+            amountCents: 500,
+            cadence: 'one_time',
+            receivedOn: '2020-06-10',
+          },
+          {
+            id: 3,
+            name: 'Jährlich',
+            amountCents: 1200,
+            cadence: 'yearly',
+            receivedOn: '2020-02-29',
+            endsOn: '2021-03-01',
+          },
+          // never counted before the migration — stays uncounted
+          {
+            id: 4,
+            name: 'Offen',
+            amountCents: 700,
+            cadence: 'one_time',
+            receivedOn: '2020-06-01',
+            status: 'pending',
+            submittedBy: 'Sam',
+          },
+        ],
+      }),
+    )
+
+    const store = await Store.load(dataFile)
+    const income = store.listIncome()
+    assert.deepEqual(
+      income.map((entry) => `${entry.month}:${entry.amountCents}:${entry.note}`),
+      [
+        '2021-02:1200:Jährlich',
+        '2020-07:100:Monatlich',
+        '2020-06:500:Einmal',
+        '2020-06:100:Monatlich',
+        '2020-05:100:Monatlich',
+        '2020-02:1200:Jährlich',
+      ],
+    )
+    assert.equal(new Set(income.map((entry) => entry.id)).size, income.length)
+
+    await store.addIncome(incomeInput({ month: '2026-07' }))
+    const persisted = JSON.parse(await Deno.readTextFile(dataFile))
+    assert.equal(persisted.schemaVersion, 2)
+    assert.equal(persisted.income.length, 7)
+    assert.equal(persisted.donations, undefined)
+    assert.equal(persisted.knownUsers, undefined)
+  } finally {
+    await Deno.remove(directory, { recursive: true })
+  }
+})
+
+Deno.test('open-ended legacy donations stop at the current month', async () => {
+  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
+  try {
+    const dataFile = join(directory, 'costs.json')
+    await Deno.writeTextFile(
+      dataFile,
+      JSON.stringify({
+        ...legacyData(),
+        donations: [
+          { id: 1, name: 'Läuft', amountCents: 100, cadence: 'monthly', receivedOn: '2020-01-01' },
+        ],
+      }),
+    )
+
+    const income = (await Store.load(dataFile)).listIncome()
+    assert.equal(income[0]?.month, new Date().toISOString().slice(0, 7))
+    assert.equal(income.at(-1)?.month, '2020-01')
+    const persisted = JSON.parse(await Deno.readTextFile(dataFile))
+    assert.equal(persisted.schemaVersion, 2)
+    assert.equal(persisted.donations, undefined)
+    assert.equal(JSON.parse(await Deno.readTextFile(`${dataFile}.bak`)).schemaVersion, 1)
+
+    // A later restart reads the fixed entries instead of expanding the donation again.
+    const reloaded = await Store.load(dataFile)
+    assert.deepEqual(reloaded.listIncome(), income)
   } finally {
     await Deno.remove(directory, { recursive: true })
   }
@@ -133,7 +254,7 @@ Deno.test('loads and preserves schema-v1 records accepted by the previous releas
   try {
     const dataFile = join(directory, 'costs.json')
     const legacy = {
-      ...exportData(),
+      ...legacyData(),
       exportedAt: 'legacy timestamp',
       unknownRootField: true,
       costPoints: [
@@ -148,7 +269,7 @@ Deno.test('loads and preserves schema-v1 records accepted by the previous releas
       ],
       donations: [
         {
-          ...exportData().donations[0],
+          ...legacyData().donations[0],
           cadence: 'one_time',
           endsOn: '2026-07-02',
         },
@@ -158,7 +279,9 @@ Deno.test('loads and preserves schema-v1 records accepted by the previous releas
 
     const store = await Store.load(dataFile)
     assert.equal(store.list()[0]?.endsOn, '1969-11-01')
-    assert.equal(store.listDonations()[0]?.endsOn, '2026-07-02')
+    // the legacy one-time donation migrates into its receipt month's entry
+    assert.equal(store.listIncome()[0]?.month, '2020-07')
+    assert.equal(store.listIncome()[0]?.note, 'Legacy donation')
     await store.add(costInput({ name: 'New valid cost' }))
 
     const reloaded = await Store.load(dataFile)
@@ -168,121 +291,27 @@ Deno.test('loads and preserves schema-v1 records accepted by the previous releas
   }
 })
 
-Deno.test('keeps departed Jellyfin users as archived and re-links returning ones', async () => {
+Deno.test('income entries are created, updated, removed, and listed newest first', async () => {
   const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
   try {
     const dataFile = join(directory, 'costs.json')
     const store = await Store.load(dataFile)
 
-    await store.syncKnownUsers([
-      { id: 'u1', name: 'Alex' },
-      { id: 'u2', name: 'Sam' },
-    ])
-    // u2's account is deleted on the server — the record must survive as archived
-    let users = await store.syncKnownUsers([{ id: 'u1', name: 'Alex' }])
-    assert.equal(users.length, 2)
-    assert.equal(users.find((u) => u.id === 'u2')?.archived, true)
-    assert.equal(users.find((u) => u.id === 'u1')?.archived, false)
+    const first = await store.addIncome(incomeInput({ note: 'Kasse' }))
+    const second = await store.addIncome(incomeInput({ month: '2026-08', amountCents: 250 }))
+    assert.deepEqual([first.id, second.id], [1, 2])
+    assert.deepEqual(store.listIncome().map((entry) => entry.id), [2, 1])
 
-    // archived state survives a reload from disk
-    const reloaded = await Store.load(dataFile)
-    assert.equal(reloaded.listKnownUsers().find((u) => u.id === 'u2')?.archived, true)
-
-    // the account comes back (or is recreated with the same id) → un-archived
-    users = await store.syncKnownUsers([
-      { id: 'u1', name: 'Alex' },
-      { id: 'u2', name: 'Sam Neu' },
-    ])
-    const sam = users.find((u) => u.id === 'u2')
-    assert.equal(sam?.archived, false)
-    assert.equal(sam?.name, 'Sam Neu')
-  } finally {
-    await Deno.remove(directory, { recursive: true })
-  }
-})
-
-Deno.test('reconciles donor identities: name matches backfill, manual links spread', async () => {
-  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
-  try {
-    const store = await Store.load(join(directory, 'costs.json'))
-    const base = {
-      amountCents: 500,
-      cadence: 'one_time' as const,
-      receivedOn: '2026-07-24',
-      endsOn: null,
-      userId: null,
-    }
-    await store.addDonation({ ...base, name: 'Alex' })
-    await store.addDonation({ ...base, name: 'Kumpel' })
-    await store.addDonation({ ...base, name: 'Kumpel' })
-
-    // syncing the archive backfills by exact name (case-insensitive)
-    await store.syncKnownUsers([{ id: 'u1', name: 'alex' }])
-    const byName = (n: string) => store.listDonations().filter((d) => d.name === n)
-    assert.equal(byName('Alex')[0]?.userId, 'u1')
-    assert.equal(byName('Kumpel')[0]?.userId, null) // no matching account — untouched
-
-    // manually linking one „Kumpel“ donation spreads to the donor's other donations
-    const kumpel = byName('Kumpel')
-    await store.updateDonation(kumpel[0]!.id, { ...base, name: 'Kumpel', userId: 'u2' })
-    assert.ok(byName('Kumpel').every((d) => d.userId === 'u2'))
-
-    // future donations under a claimed name inherit the identity on write
-    await store.addDonation({ ...base, name: 'Kumpel' })
-    assert.ok(byName('Kumpel').every((d) => d.userId === 'u2'))
-
-    // correcting a manual link updates the already linked history too
-    await store.updateDonation(byName('Kumpel')[0]!.id, {
-      ...base,
-      name: 'Kumpel',
-      userId: 'u3',
-    })
-    assert.ok(byName('Kumpel').every((d) => d.userId === 'u3'))
-  } finally {
-    await Deno.remove(directory, { recursive: true })
-  }
-})
-
-Deno.test('never links ambiguous donor names', async () => {
-  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
-  try {
-    const store = await Store.load(join(directory, 'costs.json'))
-    const base = {
-      amountCents: 500,
-      cadence: 'one_time' as const,
-      receivedOn: '2026-07-24',
-      endsOn: null,
-    }
-    // two different people donated under the same label
-    await store.addDonation({ ...base, name: 'Sam', userId: 'u1' })
-    await store.addDonation({ ...base, name: 'Sam', userId: 'u2' })
-    // a third „Sam“ donation must stay unlinked — even if an account matches
-    await store.addDonation({ ...base, name: 'Sam', userId: null })
-    await store.syncKnownUsers([{ id: 'u3', name: 'Sam' }])
-    const unlinked = store.listDonations().filter((d) => d.userId === null)
-    assert.equal(unlinked.length, 1)
-  } finally {
-    await Deno.remove(directory, { recursive: true })
-  }
-})
-
-Deno.test('pending self-submissions do not claim other donations until confirmation', async () => {
-  const directory = await Deno.makeTempDir({ prefix: 'costthing-store-test-' })
-  try {
-    const store = await Store.load(join(directory, 'costs.json'))
-    const historic = await store.addDonation(donationInput())
-    const pending = await store.submitDonation(
-      donationInput(),
-      { id: 'u1', name: 'Alex' },
+    const updated = await store.updateIncome(
+      first.id,
+      incomeInput({ month: '2026-06', amountCents: 700 }),
     )
+    assert.deepEqual([updated?.month, updated?.amountCents, updated?.note], ['2026-06', 700, null])
+    assert.equal(await store.updateIncome(99, incomeInput()), null)
 
-    assert.equal(pending.userId, 'u1')
-    assert.equal(pending.status, 'pending')
-    assert.equal(store.listKnownUsers().find((u) => u.id === 'u1')?.archived, false)
-    assert.equal(store.listDonations().find((d) => d.id === historic.id)?.userId, null)
-
-    await store.confirmDonation(pending.id)
-    assert.equal(store.listDonations().find((d) => d.id === historic.id)?.userId, 'u1')
+    assert.equal(await store.removeIncome(second.id), true)
+    assert.equal(await store.removeIncome(second.id), false)
+    assert.deepEqual((await Store.load(dataFile)).listIncome().map((entry) => entry.id), [1])
   } finally {
     await Deno.remove(directory, { recursive: true })
   }
@@ -296,28 +325,83 @@ Deno.test('rejects invalid imports without replacing current data', async () => 
     const store = await Store.load(dataFile)
 
     await assert.rejects(
-      () => store.replaceFromImport({ ...exportData(), donations: [{ id: 1 }] }),
+      () => store.replaceFromImport({ ...exportData(), income: [{ id: 1 }] }),
+      /month must be a non-empty string/,
+    )
+    await assert.rejects(
+      () => store.replaceFromImport({ ...legacyData(), donations: [{ id: 1 }] }),
       /name must be a non-empty string/,
+    )
+    await assert.rejects(
+      () =>
+        store.replaceFromImport({
+          ...legacyData(),
+          donations: [
+            { ...legacyData().donations[0], id: 1 },
+            { ...legacyData().donations[0], id: 1 },
+          ],
+        }),
+      /donations contains duplicate id 1/,
+    )
+    await assert.rejects(
+      () =>
+        store.replaceFromImport({
+          ...legacyData(),
+          donations: [{ ...legacyData().donations[0], extra: true }],
+        }),
+      /donations\[0\]\.extra is not supported/,
+    )
+    await assert.rejects(
+      () =>
+        store.replaceFromImport({
+          ...legacyData(),
+          donations: [{ ...legacyData().donations[0], id: 0 }],
+        }),
+      /donations\[0\]\.id must be a safe integer/,
+    )
+    for (
+      const invalid of [
+        { receivedOn: '1969-12-01' },
+        { cadence: 'monthly', endsOn: '2020-06-30' },
+        { cadence: 'one_time', endsOn: '2020-07-31' },
+        { submittedBy: 42 },
+        { userId: '' },
+      ]
+    ) {
+      await assert.rejects(() =>
+        store.replaceFromImport({
+          ...legacyData(),
+          donations: [{ ...legacyData().donations[0], ...invalid }],
+        })
+      )
+    }
+    await assert.rejects(
+      () => store.replaceFromImport({ ...exportData(), income: undefined }),
+      /income is required for schemaVersion 2/,
+    )
+    await assert.rejects(
+      () => store.replaceFromImport({ ...exportData(), donations: [] }),
+      /root\.donations is not supported/,
     )
     await assert.rejects(
       () => store.replaceFromImport({ ...exportData(), currency: 'EURO' }),
       /three-letter currency code/,
     )
-    const { donations: _donations, ...withoutDonations } = exportData()
+    const { income: _income, ...withoutIncome } = exportData()
     await assert.rejects(
-      () => store.replaceFromImport({ ...withoutDonations, donatons: [] }),
-      /root\.donatons is not supported/,
+      () => store.replaceFromImport({ ...withoutIncome, imcome: [] }),
+      /root\.imcome is not supported/,
     )
     await assert.rejects(
       () =>
         store.replaceFromImport({
           ...exportData(),
-          donations: [{ ...exportData().donations[0], amountCents: Number.MAX_SAFE_INTEGER + 1 }],
+          income: [{ ...exportData().income[0], amountCents: Number.MAX_SAFE_INTEGER + 1 }],
         }),
       /safe integer/,
     )
-    assert.equal(store.listDonations()[0]?.name, 'Legacy donation')
-    assert.equal(JSON.parse(await Deno.readTextFile(dataFile)).donations[0].name, 'Legacy donation')
+    assert.equal(store.listIncome()[0]?.note, 'Kasse')
+    assert.equal(JSON.parse(await Deno.readTextFile(dataFile)).income[0].note, 'Kasse')
   } finally {
     await Deno.remove(directory, { recursive: true })
   }
@@ -420,37 +504,35 @@ Deno.test('normal CRUD enforces reload-safe semantic invariants', async () => {
       /safe integer/,
     )
     await assert.rejects(
-      () => store.addDonation(donationInput({ receivedOn: '2025-02-29' })),
-      /not a valid date/,
+      () => store.addIncome(incomeInput({ month: '2026-13' })),
+      /must be YYYY-MM/,
     )
     await assert.rejects(
-      () => store.addDonation(donationInput({ cadence: 'monthly', endsOn: '2026-07-23' })),
-      /must be on or after/,
+      () => store.addIncome(incomeInput({ month: '2026-7' })),
+      /must be YYYY-MM/,
     )
     await assert.rejects(
-      () => store.addDonation(donationInput({ endsOn: '2026-07-24' })),
-      /must be null for one_time/,
+      () => store.addIncome(incomeInput({ month: '1969-12' })),
+      /must not be before 1970/,
+    )
+    await assert.rejects(
+      () => store.addIncome(incomeInput({ amountCents: 0 })),
+      /safe integer/,
+    )
+    await assert.rejects(
+      () => store.addIncome(incomeInput({ note: '' })),
+      /non-empty string/,
     )
 
     await store.add(costInput({ cadence: 'one_time', amortizationMonths: 60 }))
     await store.add(
       costInput({ cadence: 'custom', intervalCount: 3, intervalUnit: 'months' }),
     )
-    const donation = await store.addDonation(
-      donationInput({ cadence: 'monthly', endsOn: '2026-08-01' }),
-    )
-    await assert.rejects(
-      () =>
-        store.updateDonation(
-          donation.id,
-          donationInput({ cadence: 'monthly', endsOn: '2026-07-23' }),
-        ),
-      /must be on or after/,
-    )
+    await store.addIncome(incomeInput({ note: 'Kasse' }))
 
     const reloaded = await Store.load(dataFile)
     assert.equal(reloaded.list().length, 2)
-    assert.equal(reloaded.listDonations().length, 1)
+    assert.equal(reloaded.listIncome().length, 1)
   } finally {
     await Deno.remove(directory, { recursive: true })
   }
@@ -508,17 +590,14 @@ Deno.test('does not expose mutable aliases', async () => {
     exported.costPoints[0]!.name = 'Changed export'
     exported.categoryIcons.Hardware = 'changed-export-icon'
 
-    const donation = await store.addDonation(donationInput())
-    donation.name = 'Changed donation result'
-    const donations = store.listDonations()
-    donations[0]!.name = 'Changed donation list'
-    const users = await store.syncKnownUsers([{ id: 'u1', name: 'Alex' }])
-    users[0]!.name = 'Changed user list'
+    const entry = await store.addIncome(incomeInput({ note: 'Kasse' }))
+    entry.note = 'Changed result'
+    const income = store.listIncome()
+    income[0]!.note = 'Changed list'
 
     assert.equal(store.list()[0]?.name, 'Original')
     assert.equal(store.categoryIcons.Hardware, 'server')
-    assert.equal(store.listDonations()[0]?.name, 'Alex')
-    assert.equal(store.listKnownUsers()[0]?.name, 'Alex')
+    assert.equal(store.listIncome()[0]?.note, 'Kasse')
     assert.equal((await Store.load(dataFile)).list()[0]?.name, 'Original')
   } finally {
     await Deno.remove(directory, { recursive: true })

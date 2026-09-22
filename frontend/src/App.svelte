@@ -16,13 +16,11 @@
   import { api, ApiError } from './lib/api.ts'
   import type { ConfirmDialogState } from './lib/dialog.ts'
   import { cents, moneyFormatter } from './lib/format.ts'
-  import type { KnownUser, Me, Summary, SummaryPoint } from '../../shared/types.ts'
+  import type { Me, Summary, SummaryPoint } from '../../shared/types.ts'
 
   let view = $state<'loading' | 'gate' | 'ready' | 'error'>('loading')
   let summary = $state<Summary | null>(null)
   let me = $state<Me | null>(null)
-  /** admin only: Jellyfin users (incl. archived) for linking donations */
-  let knownUsers = $state<KnownUser[]>([])
   let loadError = $state('')
 
   // ---- theme ----
@@ -109,25 +107,12 @@
       if (version !== loadVersion) return
       summary = nextSummary
       me = nextMe
-      if (nextMe.isAdmin) {
-        // Best effort: keep an already loaded archive during a transient failure.
-        try {
-          const users = await api.users()
-          if (version !== loadVersion) return
-          knownUsers = users
-        } catch (err) {
-          if (err instanceof ApiError && (err.status === 401 || err.status === 403)) throw err
-        }
-      } else {
-        knownUsers = []
-      }
       view = 'ready'
     } catch (err) {
       if (version !== loadVersion) return
       if (err instanceof ApiError && err.status === 401) {
         summary = null
         me = null
-        knownUsers = []
         menuOpen = false
         view = 'gate'
       } else {
@@ -155,7 +140,6 @@
       loadVersion++
       summary = null
       me = null
-      knownUsers = []
       menuOpen = false
       view = 'gate'
     } catch (err) {
@@ -199,10 +183,20 @@
       return
     }
 
-    const candidate = data as { costPoints?: unknown; donations?: unknown }
+    const candidate = data as {
+      schemaVersion?: unknown
+      costPoints?: unknown
+      donations?: unknown
+      income?: unknown
+    }
     const costs = Array.isArray(candidate?.costPoints) ? candidate.costPoints.length : null
-    const donationCount = Array.isArray(candidate?.donations) ? candidate.donations.length : null
-    if (costs === null || donationCount === null) {
+    const isLegacy = candidate?.schemaVersion === 1
+    const entries = isLegacy
+      ? (Array.isArray(candidate?.donations) ? candidate.donations.length : null)
+      : candidate?.schemaVersion === 2
+        ? (Array.isArray(candidate?.income) ? candidate.income.length : null)
+        : null
+    if (costs === null || entries === null) {
       showImportError('Die Datei enthält keinen gültigen costthing-Export.')
       return
     }
@@ -210,7 +204,12 @@
     confirmDialog = {
       title: 'JSON importieren?',
       body:
-        `Die aktuellen Daten werden durch ${costs} Kostenpunkte und ${donationCount} Spenden ersetzt. ` +
+        `Die aktuellen Daten werden durch ${costs} Kostenpunkte und ${entries} ${
+          isLegacy ? 'Spenden aus einem v1-Export' : 'Einnahmen'
+        } ersetzt. ` +
+        (isLegacy
+          ? 'Die Spenden werden dabei in monatliche Einnahmen umgewandelt. Ausstehende Meldungen und künftige Wiederholungen werden nicht gebucht; das Spenderverzeichnis wird entfernt. '
+          : '') +
         'Der bisherige Stand bleibt als costs.json.bak erhalten.',
       actions: [
         { label: 'Importieren', kind: 'danger', run: () => void doImport(data) },
@@ -360,13 +359,11 @@
       <div class="entries-col">
         <EntryTable
           points={summary.points}
-          donations={summary.donations}
+          income={summary.income}
           categoryIcons={summary.categoryIcons}
           coverage={summary.coverage}
           {fmt}
           {admin}
-          {knownUsers}
-          meName={me?.name ?? ''}
           onchanged={load}
           onadminerror={handleAdminError}
         />
@@ -377,7 +374,7 @@
           <div class="section-head">
             <h2 class="section-title">Kosten nach Kategorie</h2>
             <p class="section-note">
-              aktueller Monat · {cents(fmt, summary.totals.yearlyCents)}/Jahr
+              {cents(fmt, summary.totals.yearlyCents)}/Jahr
             </p>
           </div>
           <CategoryPie
@@ -387,8 +384,8 @@
         </section>
         <section class="stat-block">
           <div class="section-head">
-            <h2 class="section-title">Kosten &amp; Spenden</h2>
-            <p class="section-note">gesamt + 12 Monate Prognose</p>
+            <h2 class="section-title">Kosten &amp; Einnahmen</h2>
+            <p class="section-note">gebucht + 12 Monate Kostenprognose</p>
           </div>
           <TimelineChart timeline={summary.timeline} coverage={summary.coverage} {fmt} />
         </section>

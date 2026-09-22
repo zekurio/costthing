@@ -1,8 +1,8 @@
 # costthing
 
 A small dashboard that shows what running a shared Jellyfin server costs — per category, per month
-and per year — and how far donations cover it. Built for transparency towards the friends using the
-server.
+and per year — and whether recorded income covers it. Built for transparency towards the friends
+using the server.
 
 Login is Jellyfin's own: anyone with an account sees the totals, the timeline and the full item
 list, while adding, editing, cancelling and deleting is reserved for Jellyfin administrators.
@@ -23,22 +23,23 @@ Every cost point has a cadence:
 `endsOn` ("kündigen" in the UI) keeps a point counting through that month and drops it afterwards,
 so historic months stay intact in the timeline. Deleting a point instead removes it retroactively.
 
-### Donations
+### Income pot
 
-Donations are one-off, monthly or yearly. Any logged-in user can report one for themselves; it stays
-_pending_ and uncounted until an admin confirms it. Admins can add, edit and delete donations
-directly.
+Admins book received income manually, typically at the end of a month. Each entry has a month, an
+amount in cents and an optional note. Several entries can belong to the same month. There are no
+recurring income schedules, donor accounts, self-reports or confirmation steps.
 
-The dashboard shows how much of the current month's cost is covered, the surplus or shortfall, and a
-cumulative balance starting at the first donation month — earlier cost-only history is ignored so it
-does not drown the balance in deficit. The timeline chart draws donations as a second curve.
+The pot compares income booked through the current month with accumulated monthly costs, including
+amortization. The balance starts at the first income month, preserving the previous balance window.
+Earlier cost-only months remain visible in the timeline but do not reduce the pot. Before any income
+is booked, the cumulative balance is zero. Future bookings do not count toward the current balance.
+This is an amortized cost balance, not a bank-account balance.
 
-Donations link to Jellyfin accounts, one donor name to one identity. Self-reports link to the
-submitter; on every write unlinked donations inherit the link of same-named linked donations, and
-otherwise match an account by exact name (case-insensitive). Names claimed by several users stay
-unlinked. Every user ever seen is kept in a `knownUsers` registry and archived rather than deleted
-when the account disappears from Jellyfin, so old donations remain attributable. The registry syncs
-whenever an admin loads the user list.
+Schema v1 files and exports migrate to schema v2. Confirmed donations become income entries for each
+month they counted through the migration month, with the donor name retained as a note. Pending
+submissions and future occurrences do not become booked income. No further income is generated after
+migration. Export your old data before upgrading if you need to retain the donor registry or pending
+submissions; the normal one-step backup is replaced by subsequent writes.
 
 ### Storage
 
@@ -78,25 +79,22 @@ writes `frontend/dist`, which `deno task start` then serves together with the AP
 
 ### API
 
-| Endpoint                          | Auth             | Purpose                                                |
-| --------------------------------- | ---------------- | ------------------------------------------------------ |
-| `GET /api/health`                 | —                | healthcheck                                            |
-| `POST /api/auth`                  | —                | Jellyfin username/password → session cookie            |
-| `POST /api/logout`                | —                | invalidate the Jellyfin session + clear the cookie     |
-| `GET /api/me`                     | session cookie   | current user: name, admin status, avatar availability  |
-| `GET /api/me/avatar`              | session cookie   | proxied Jellyfin profile image                         |
-| `GET /api/summary`                | session cookie   | cost points, donations, coverage, timeline, totals     |
-| `POST /api/donations/submit`      | session cookie   | self-report a donation (pending until confirmed)       |
-| `GET /api/users`                  | + Jellyfin admin | Jellyfin users incl. archived ones; syncs the registry |
-| `GET /api/export`                 | + Jellyfin admin | download the raw JSON                                  |
-| `POST /api/import`                | + Jellyfin admin | validate and replace data from JSON                    |
-| `POST /api/costs`                 | + Jellyfin admin | add a cost point                                       |
-| `PUT /api/costs/:id`              | + Jellyfin admin | replace a cost point                                   |
-| `DELETE /api/costs/:id`           | + Jellyfin admin | delete a cost point                                    |
-| `POST /api/donations`             | + Jellyfin admin | add a confirmed donation                               |
-| `POST /api/donations/:id/confirm` | + Jellyfin admin | confirm a pending donation                             |
-| `PUT /api/donations/:id`          | + Jellyfin admin | replace a donation                                     |
-| `DELETE /api/donations/:id`       | + Jellyfin admin | delete a donation                                      |
+| Endpoint                 | Auth             | Purpose                                               |
+| ------------------------ | ---------------- | ----------------------------------------------------- |
+| `GET /api/health`        | —                | healthcheck                                           |
+| `POST /api/auth`         | —                | Jellyfin username/password → session cookie           |
+| `POST /api/logout`       | —                | invalidate the Jellyfin session + clear the cookie    |
+| `GET /api/me`            | session cookie   | current user: name, admin status, avatar availability |
+| `GET /api/me/avatar`     | session cookie   | proxied Jellyfin profile image                        |
+| `GET /api/summary`       | session cookie   | cost points, income, coverage, timeline, totals       |
+| `GET /api/export`        | + Jellyfin admin | download the raw JSON                                 |
+| `POST /api/import`       | + Jellyfin admin | validate and replace data from JSON                   |
+| `POST /api/costs`        | + Jellyfin admin | add a cost point                                      |
+| `PUT /api/costs/:id`     | + Jellyfin admin | replace a cost point                                  |
+| `DELETE /api/costs/:id`  | + Jellyfin admin | delete a cost point                                   |
+| `POST /api/income`       | + Jellyfin admin | book income for a month                               |
+| `PUT /api/income/:id`    | + Jellyfin admin | replace an income entry                               |
+| `DELETE /api/income/:id` | + Jellyfin admin | delete an income entry                                |
 
 ### License
 

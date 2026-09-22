@@ -31,7 +31,7 @@
   }
 
   const maxCents = $derived(
-    niceScaleMax(Math.max(1, ...timeline.map((t) => Math.max(t.totalCents, t.donatedCents)))),
+    niceScaleMax(Math.max(1, ...timeline.map((t) => Math.max(t.totalCents, t.incomeCents)))),
   )
   const exactNowIdx = $derived(timeline.findIndex((t) => t.month === nowMonth))
   const nowIdx = $derived.by(() => {
@@ -63,36 +63,25 @@
       : '',
   )
 
-  // ---- donation curve: history + recurring-donation forecast ----
+  // ---- booked income curve: history only, never a recurring forecast ----
 
-  const firstDonIdx = $derived(timeline.findIndex((t) => t.donatedCents > 0))
-  const donActive = $derived(firstDonIdx !== -1)
-  // Keep the zero-value history so the donation curve grows naturally from the
-  // baseline instead of appearing halfway through the chart.
-  const donPts = $derived(
-    donActive ? timeline.map((t, i) => ({ X: x(i), Y: y(t.donatedCents) })) : [],
+  const firstIncomeIdx = $derived(timeline.findIndex((t) => t.incomeCents > 0))
+  const incomeActive = $derived(firstIncomeIdx !== -1)
+  const incomePts = $derived(
+    incomeActive
+      ? timeline.slice(0, nowIdx + 1).map((t, i) => ({ X: x(i), Y: y(t.incomeCents) }))
+      : [],
   )
-  const donNowIdx = $derived(nowIdx)
-  const donPath = $derived(toPath(donPts.slice(0, donNowIdx + 1)))
-  const donFuturePath = $derived(toPath(donPts.slice(donNowIdx)))
-  const donAreaPath = $derived(
-    donPts.length > 0
-      ? `${donPath} L ${donPts[donNowIdx]!.X.toFixed(1)} ${y(0)} L ${donPts[0]!.X.toFixed(1)} ${y(0)} Z`
+  const incomePath = $derived(toPath(incomePts))
+  const incomeAreaPath = $derived(
+    incomePts.length > 0
+      ? `${incomePath} L ${incomePts[incomePts.length - 1]!.X.toFixed(1)} ${y(0)} L ${
+        incomePts[0]!.X.toFixed(1)
+      } ${y(0)} Z`
       : '',
   )
-  const donNow = $derived(donPts[donNowIdx] ?? null)
-
-  // ---- current-month coverage ----
-
-  const donPct = $derived(
-    coverage.costCents > 0 ? Math.round((coverage.donatedCents / coverage.costCents) * 100) : null,
-  )
-
-  // ---- stock-style header: current value + deltas ----
 
   const current = $derived(coverage.costCents)
-  const prev = $derived(exactNowIdx > 0 ? timeline[exactNowIdx - 1]?.totalCents : undefined)
-  const yearAgo = $derived(exactNowIdx >= 12 ? timeline[exactNowIdx - 12]?.totalCents : undefined)
 
   // ---- hover ----
 
@@ -112,10 +101,10 @@
   const controlIndex = $derived(hover ?? (exactNowIdx >= 0 ? exactNowIdx : nowIdx))
   const controlEntry = $derived(timeline[controlIndex] ?? null)
 
-  const hoverDonY = $derived.by(() => {
-    if (hover === null || !donActive) return null
+  const hoverIncomeY = $derived.by(() => {
+    if (hover === null || !incomeActive || hover > nowIdx) return null
     const entry = timeline[hover]
-    return entry ? y(entry.donatedCents) : null
+    return entry ? y(entry.incomeCents) : null
   })
 
   // ---- ticks ----
@@ -129,9 +118,6 @@
     return `${month} ${String(y ?? 0).slice(2)}`
   }
 
-  function deltaClass(delta: number): string {
-    return delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat'
-  }
 </script>
 
 <div class="summary-panel">
@@ -143,56 +129,25 @@
         <span class="stock-sub">Stand {monthLabel(nowMonth)}</span>
       </div>
     </div>
-    <div class="deltas">
-      {#if prev !== undefined}
-        {@const d = current - prev}
-        <span class="delta {deltaClass(d)}">
-          {d > 0 ? '▲' : d < 0 ? '▼' : '＝'} {cents(fmt, Math.abs(d))}
-          <small>zum Vormonat</small>
-        </span>
-      {/if}
-      {#if yearAgo !== undefined}
-        {@const d = current - yearAgo}
-        <span class="delta {deltaClass(d)}">
-          {d > 0 ? '▲' : d < 0 ? '▼' : '＝'} {cents(fmt, Math.abs(d))}
-          <small>zum Vorjahr</small>
-        </span>
-      {/if}
-    </div>
   </div>
 
   <div class="metric-grid">
     <div class="metric-card">
-      <span class="metric-label">Spenden</span>
-      <strong>{cents(fmt, coverage.donatedCents)}</strong>
+      <span class="metric-label">Einnahmen bisher</span>
+      <strong>{cents(fmt, coverage.totalIncomeCents)}</strong>
       <span class="metric-detail">
-        {donPct !== null ? `${donPct} % gedeckt` : 'keine Kosten'} im {monthLabel(coverage.month)}
-      </span>
-    </div>
-    <div class="metric-card" class:positive={coverage.balanceCents > 0} class:negative={coverage.balanceCents < 0}>
-      <span class="metric-label">Monatsbilanz</span>
-      <strong>{signedCents(fmt, coverage.balanceCents)}</strong>
-      <span class="metric-detail">
-        {coverage.balanceCents > 0
-          ? 'Überschuss'
-          : coverage.balanceCents < 0
-            ? 'Fehlbetrag'
-            : 'Ausgeglichen'} im {monthLabel(coverage.month)}
+        gebucht bis einschließlich {monthLabel(coverage.month)}
       </span>
     </div>
     <div
       class="metric-card total"
-      class:positive={coverage.cumulativeBalanceCents > 0}
-      class:negative={coverage.cumulativeBalanceCents < 0}
+      class:positive={coverage.totalBalanceCents > 0}
+      class:negative={coverage.totalBalanceCents < 0}
     >
-      <span class="metric-label">Gesamtbilanz</span>
-      <strong>{signedCents(fmt, coverage.cumulativeBalanceCents)}</strong>
+      <span class="metric-label">Topfstand</span>
+      <strong>{signedCents(fmt, coverage.totalBalanceCents)}</strong>
       <span class="metric-detail">
-        {coverage.cumulativeBalanceCents > 0
-          ? 'Gesamtüberschuss'
-          : coverage.cumulativeBalanceCents < 0
-            ? 'Gesamtfehlbetrag'
-            : 'Ausgeglichen'} seit der ersten Spende
+        nach {cents(fmt, coverage.totalCostCents)} Kosten seit der ersten Einnahme
       </span>
     </div>
   </div>
@@ -201,13 +156,13 @@
 <div class="chart-wrap">
   <div class="legend" aria-hidden="true">
     <span><i class="swatch cost"></i>Kosten</span>
-    <span><i class="swatch don"></i>Spenden</span>
+    <span><i class="swatch income"></i>Einnahmen</span>
   </div>
   <svg
     viewBox="0 0 {W} {H}"
     class="chart"
     role="img"
-    aria-label="Monatskosten und Spenden im Verlauf"
+    aria-label="Monatskosten und Einnahmen im Verlauf"
     onpointermove={onMove}
     onpointerleave={() => (hover = null)}
   >
@@ -223,14 +178,11 @@
     {/if}
 
     <path d={areaPath} class="area" />
-    {#if donAreaPath}
-      <path d={donAreaPath} class="area donation" />
+    {#if incomeAreaPath}
+      <path d={incomeAreaPath} class="area income" />
     {/if}
-    {#if donPath}
-      <path d={donPath} class="line donation" />
-    {/if}
-    {#if donFuturePath}
-      <path d={donFuturePath} class="line donation future" />
+    {#if incomePath}
+      <path d={incomePath} class="line income" />
     {/if}
     <path d={futurePath} class="line future" />
     <path d={solidPath} class="line" />
@@ -239,10 +191,6 @@
       {@const nowPoint = pts[exactNowIdx]}
       <circle cx={nowPoint.X} cy={nowPoint.Y} r="3.5" class="now-dot" />
     {/if}
-    {#if donNow}
-      <circle cx={donNow.X} cy={donNow.Y} r="3.5" class="now-dot don" />
-    {/if}
-
     {#each timeline as t, i (t.month)}
       {#if i % labelEvery === 0}
         <text
@@ -257,8 +205,8 @@
     {#if hoverPoint}
       <line x1={hoverPoint.X} x2={hoverPoint.X} y1={PAD_TOP - 8} y2={y(0)} class="crosshair" />
       <circle cx={hoverPoint.X} cy={hoverPoint.Y} r="4.5" class="hover-dot" />
-      {#if hoverDonY !== null}
-        <circle cx={hoverPoint.X} cy={hoverDonY} r="4" class="hover-dot don" />
+      {#if hoverIncomeY !== null}
+        <circle cx={hoverPoint.X} cy={hoverIncomeY} r="4" class="hover-dot income" />
       {/if}
     {/if}
   </svg>
@@ -272,7 +220,7 @@
       value={controlIndex}
       aria-label="Monat im Verlauf auswählen"
       aria-valuetext={controlEntry
-        ? `${monthLabel(controlEntry.month)}: ${cents(fmt, controlEntry.totalCents)} Kosten, ${cents(fmt, controlEntry.donatedCents)} Spenden`
+        ? `${monthLabel(controlEntry.month)}: ${cents(fmt, controlEntry.totalCents)} Kosten, ${cents(fmt, controlEntry.incomeCents)} Einnahmen`
         : undefined}
       onfocus={() => (hover = exactNowIdx >= 0 ? exactNowIdx : nowIdx)}
       onblur={() => (hover = null)}
@@ -293,8 +241,7 @@
       <span class="tip-month">{monthLabel(hoverEntry.month)}</span>
       <span class="tip-row"><i class="swatch cost"></i>{cents(fmt, hoverEntry.totalCents)}</span>
       <span class="tip-row">
-        <i class="swatch don"></i>{cents(fmt, hoverEntry.donatedCents)}
-        {hoverEntry.month > nowMonth ? ' geplant' : ''}
+        <i class="swatch income"></i>{cents(fmt, hoverEntry.incomeCents)}
       </span>
     </div>
   {/if}
@@ -347,42 +294,9 @@
     font-size: 12px;
   }
 
-  .deltas {
-    display: flex;
-    justify-content: flex-end;
-    gap: 14px;
-    font-size: 12px;
-    flex-wrap: wrap;
-  }
-
-  .delta {
-    display: flex;
-    flex-direction: column;
-    font-weight: 650;
-    line-height: 1.25;
-  }
-
-  .delta small {
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 400;
-  }
-
-  .delta.up {
-    color: var(--danger-strong);
-  }
-
-  .delta.down {
-    color: var(--ok-strong);
-  }
-
-  .delta.flat {
-    color: var(--muted);
-  }
-
   .metric-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .metric-card {
@@ -433,10 +347,6 @@
       flex-direction: column;
     }
 
-    .deltas {
-      justify-content: flex-start;
-    }
-
     .metric-grid {
       grid-template-columns: 1fr;
     }
@@ -477,7 +387,7 @@
     background: var(--accent);
   }
 
-  .swatch.don {
+  .swatch.income {
     background: var(--ok);
   }
 
@@ -565,7 +475,7 @@
     opacity: 0.14;
   }
 
-  .area.donation {
+  .area.income {
     fill: var(--ok);
   }
 
@@ -582,7 +492,7 @@
     opacity: 0.45;
   }
 
-  .line.donation {
+  .line.income {
     stroke: var(--ok);
     stroke-width: 2;
   }
@@ -591,10 +501,6 @@
     fill: var(--accent);
     stroke: var(--surface);
     stroke-width: 2;
-  }
-
-  .now-dot.don {
-    fill: var(--ok);
   }
 
   .crosshair {
@@ -610,7 +516,7 @@
     stroke-width: 2;
   }
 
-  .hover-dot.don {
+  .hover-dot.income {
     stroke: var(--ok);
   }
 

@@ -8,12 +8,11 @@ import {
   type CostInput,
   type CostPoint,
   CostSaveInputSchema,
-  type Donation,
-  type DonationInput,
-  DonationSaveInputSchema,
   IdParamsSchema,
+  type IncomeEntry,
+  type IncomeInput,
+  IncomeSaveInputSchema,
   type JellyfinUser,
-  type KnownUser,
   type Me,
   type Summary,
 } from '../shared/types.ts'
@@ -42,7 +41,6 @@ interface JellyfinClient {
     deviceId: string,
   ): Promise<{ token: string; user: JellyfinUser } | null>
   user(token: string): Promise<JellyfinUser | null>
-  users(token: string): Promise<JellyfinUser[]>
   logout(token: string): Promise<void>
   avatar(userId: string, tag: string, token: string): Promise<Response>
 }
@@ -51,20 +49,13 @@ interface AppStore {
   readonly currency: string
   readonly categoryIcons: Record<string, string>
   list(): CostPoint[]
-  listDonations(): Donation[]
-  listKnownUsers(): KnownUser[]
-  syncKnownUsers(users: Array<{ id: string; name: string }>): Promise<KnownUser[]>
+  listIncome(): IncomeEntry[]
   add(input: CostInput, icon?: string | null): Promise<CostPoint>
   update(id: number, input: CostInput, icon?: string | null): Promise<CostPoint | null>
   remove(id: number): Promise<boolean>
-  addDonation(input: DonationInput): Promise<Donation>
-  submitDonation(
-    input: DonationInput,
-    submitter: { id: string; name: string },
-  ): Promise<Donation>
-  confirmDonation(id: number): Promise<Donation | null>
-  updateDonation(id: number, input: DonationInput): Promise<Donation | null>
-  removeDonation(id: number): Promise<boolean>
+  addIncome(input: IncomeInput): Promise<IncomeEntry>
+  updateIncome(id: number, input: IncomeInput): Promise<IncomeEntry | null>
+  removeIncome(id: number): Promise<boolean>
   export(): CostFile
   replaceFromImport(value: unknown): Promise<CostFile>
 }
@@ -140,14 +131,14 @@ async function adminAuthorization(context: Context<AppEnv>, next: Next) {
 function summary(store: AppStore): Summary {
   const now = new Date()
   const stored = store.list()
-  const donations = store.listDonations()
+  const income = store.listIncome()
   const points = stored.map((point) => ({
     ...point,
     monthlyCents: monthlyCents(point, now),
     amortizationElapsedMonths: amortizationElapsed(point, now),
   }))
   const totalMonthly = points.reduce((sum, point) => sum + point.monthlyCents, 0)
-  const timeline = buildTimeline(stored, donations, now)
+  const timeline = buildTimeline(stored, income, now)
   return {
     currency: store.currency,
     generatedAt: now.toISOString(),
@@ -157,9 +148,9 @@ function summary(store: AppStore): Summary {
       pointCount: points.length,
     },
     points,
-    donations,
+    income,
     categoryIcons: store.categoryIcons,
-    coverage: buildCoverage(timeline, donations, now),
+    coverage: buildCoverage(timeline, income, now),
     timeline,
   }
 }
@@ -168,17 +159,6 @@ function summary(store: AppStore): Summary {
 export function createApp({ jellyfin, store, staticDir, serveStatic }: AppDependencies) {
   const admin = new Hono<AppEnv>()
     .use('*', adminAuthorization)
-    .get('/users', async (context) => {
-      const { token } = context.get('session')
-      try {
-        const live = await jellyfin.users(token)
-        return context.json(await store.syncKnownUsers(live), 200)
-      } catch (error) {
-        if (!isNamedError(error, 'JellyfinError')) throw error
-        // An outage must not erase the user archive or block the rest of the dashboard.
-        return context.json(store.listKnownUsers(), 200)
-      }
-    })
     .get('/export', (context) => {
       context.header(
         'content-disposition',
@@ -228,41 +208,32 @@ export function createApp({ jellyfin, store, staticDir, serveStatic }: AppDepend
       },
     )
     .post(
-      '/donations',
-      typeboxValidator('json', DonationSaveInputSchema),
+      '/income',
+      typeboxValidator('json', IncomeSaveInputSchema),
       async (context) => {
-        const { userId = null, ...input } = context.req.valid('json')
-        return context.json(await store.addDonation({ ...input, userId }), 201)
-      },
-    )
-    .post(
-      '/donations/:id/confirm',
-      typeboxValidator('param', IdParamsSchema),
-      async (context) => {
-        const confirmed = await store.confirmDonation(context.req.valid('param').id)
-        if (!confirmed) return context.json({ error: 'not found' }, 404)
-        return context.json(confirmed, 200)
+        const { note = null, ...input } = context.req.valid('json')
+        return context.json(await store.addIncome({ ...input, note }), 201)
       },
     )
     .put(
-      '/donations/:id',
+      '/income/:id',
       typeboxValidator('param', IdParamsSchema),
-      typeboxValidator('json', DonationSaveInputSchema),
+      typeboxValidator('json', IncomeSaveInputSchema),
       async (context) => {
-        const { userId = null, ...input } = context.req.valid('json')
-        const updated = await store.updateDonation(context.req.valid('param').id, {
+        const { note = null, ...input } = context.req.valid('json')
+        const updated = await store.updateIncome(context.req.valid('param').id, {
           ...input,
-          userId,
+          note,
         })
         if (!updated) return context.json({ error: 'not found' }, 404)
         return context.json(updated, 200)
       },
     )
     .delete(
-      '/donations/:id',
+      '/income/:id',
       typeboxValidator('param', IdParamsSchema),
       async (context) => {
-        const removed = await store.removeDonation(context.req.valid('param').id)
+        const removed = await store.removeIncome(context.req.valid('param').id)
         if (!removed) return context.json({ error: 'not found' }, 404)
         return context.body(null, 204)
       },
@@ -277,20 +248,6 @@ export function createApp({ jellyfin, store, staticDir, serveStatic }: AppDepend
       return await jellyfin.avatar(user.id, user.avatarTag, token)
     })
     .get('/summary', (context) => context.json(summary(store), 200))
-    // Self-reports are always linked to the session user and stay pending.
-    .post(
-      '/donations/submit',
-      typeboxValidator('json', DonationSaveInputSchema),
-      async (context) => {
-        const { user } = context.get('session')
-        const { userId: _ignored, ...input } = context.req.valid('json')
-        const donation = await store.submitDonation({ ...input, userId: user.id }, {
-          id: user.id,
-          name: user.name,
-        })
-        return context.json(donation, 201)
-      },
-    )
     .route('/', admin)
 
   const api = new Hono<AppEnv>()

@@ -5,6 +5,7 @@ const SAFE_INTEGER = Number.MAX_SAFE_INTEGER
 
 export const DateStringSchema = Type.String({ pattern: DATE_PATTERN })
 export const NullableDateSchema = Type.Union([DateStringSchema, Type.Null()])
+export const MonthStringSchema = Type.String({ pattern: '^\\d{4}-\\d{2}$' })
 
 export const CadenceSchema = Type.Union([
   Type.Literal('one_time'),
@@ -13,19 +14,6 @@ export const CadenceSchema = Type.Union([
   Type.Literal('custom'),
 ])
 export type Cadence = Static<typeof CadenceSchema>
-
-export const DonationCadenceSchema = Type.Union([
-  Type.Literal('one_time'),
-  Type.Literal('monthly'),
-  Type.Literal('yearly'),
-])
-export type DonationCadence = Static<typeof DonationCadenceSchema>
-
-export const DonationStatusSchema = Type.Union([
-  Type.Literal('confirmed'),
-  Type.Literal('pending'),
-])
-export type DonationStatus = Static<typeof DonationStatusSchema>
 
 export const IntervalUnitSchema = Type.Union([
   Type.Literal('days'),
@@ -88,58 +76,39 @@ export const CostSaveInputSchema = Type.Object({
 }, { additionalProperties: false })
 export type CostSaveInput = Static<typeof CostSaveInputSchema>
 
-export const DonationSchema = Type.Object({
+/**
+ * Money received, booked manually for one calendar month. The pot model keeps
+ * no per-donor books: an entry is just amount, month and an optional note.
+ */
+export const IncomeEntrySchema = Type.Object({
   id: Type.Integer({ minimum: 1, maximum: SAFE_INTEGER }),
-  /** Label, for example a donor name or source, shown publicly. */
-  name: Type.String({ minLength: 1 }),
+  /** Booked month, YYYY-MM: the month this income belongs to. */
+  month: MonthStringSchema,
   amountCents: Type.Integer({ minimum: 1, maximum: SAFE_INTEGER }),
-  cadence: DonationCadenceSchema,
-  /** ISO date, YYYY-MM-DD; the receipt date or first occurrence. */
-  receivedOn: DateStringSchema,
-  /** Recurring only: counts through the month containing this date. */
-  endsOn: NullableDateSchema,
-  /** Pending submissions do not count until an admin confirms them. */
-  status: DonationStatusSchema,
-  /** Jellyfin username of the submitter, null if added by an admin. */
-  submittedBy: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  /** Jellyfin user id this donation belongs to, null for an external donor. */
-  userId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  /** Optional free-text note, for example what the income was. */
+  note: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
 }, { additionalProperties: false })
-export type Donation = Static<typeof DonationSchema>
+export type IncomeEntry = Static<typeof IncomeEntrySchema>
 
-export const DonationInputSchema = Type.Omit(DonationSchema, ['id', 'status', 'submittedBy'])
-export type DonationInput = Static<typeof DonationInputSchema>
+export const IncomeInputSchema = Type.Omit(IncomeEntrySchema, ['id'])
+export type IncomeInput = Static<typeof IncomeInputSchema>
 
-/** The wire payload accepts old clients that omit userId. */
-export const DonationSaveInputSchema = Type.Object({
-  ...DonationInputSchema.properties,
-  name: Type.String({ minLength: 1, maxLength: 200 }),
-  userId: Type.Optional(Type.Union([
-    Type.String({ minLength: 1, maxLength: 100 }),
+/** The wire payload accepts clients that omit note and caps its length. */
+export const IncomeSaveInputSchema = Type.Object({
+  ...IncomeInputSchema.properties,
+  note: Type.Optional(Type.Union([
+    Type.String({ minLength: 1, maxLength: 500 }),
     Type.Null(),
   ])),
 }, { additionalProperties: false })
-export type DonationSaveInput = Static<typeof DonationSaveInputSchema>
-
-/**
- * A Jellyfin user seen at least once by this app. Records survive account
- * deletion so old donations stay attributable and returning donors reuse ids.
- */
-export const KnownUserSchema = Type.Object({
-  id: Type.String({ minLength: 1 }),
-  name: Type.String({ minLength: 1 }),
-  lastSeenAt: Type.String({ minLength: 1 }),
-  archived: Type.Boolean(),
-}, { additionalProperties: false })
-export type KnownUser = Static<typeof KnownUserSchema>
+export type IncomeSaveInput = Static<typeof IncomeSaveInputSchema>
 
 export const CostFileSchema = Type.Object({
-  schemaVersion: Type.Literal(1),
+  schemaVersion: Type.Literal(2),
   currency: Type.String({ minLength: 1 }),
   exportedAt: Type.String({ minLength: 1 }),
   costPoints: Type.Array(CostPointSchema),
-  donations: Type.Array(DonationSchema),
-  knownUsers: Type.Array(KnownUserSchema),
+  income: Type.Array(IncomeEntrySchema),
   /** Category name to a persisted lucide icon name. */
   categoryIcons: Type.Record(Type.String(), Type.String({ minLength: 1 })),
 }, { additionalProperties: false })
@@ -156,10 +125,10 @@ export type SummaryPoint = Static<typeof SummaryPointSchema>
 
 export const TimelineEntrySchema = Type.Object({
   /** YYYY-MM */
-  month: Type.String({ pattern: '^\\d{4}-\\d{2}$' }),
+  month: MonthStringSchema,
   totalCents: Type.Number(),
-  /** Donations received that month. */
-  donatedCents: Type.Number(),
+  /** Income booked for that month. */
+  incomeCents: Type.Number(),
   /** Category name to cents that month. */
   categories: Type.Record(Type.String(), Type.Number()),
 }, { additionalProperties: false })
@@ -167,13 +136,19 @@ export type TimelineEntry = Static<typeof TimelineEntrySchema>
 
 export const CoverageSchema = Type.Object({
   /** Current month, YYYY-MM. */
-  month: Type.String({ pattern: '^\\d{4}-\\d{2}$' }),
+  month: MonthStringSchema,
+  /** Cost of the current month, in cents. */
   costCents: Type.Number(),
-  donatedCents: Type.Number(),
-  /** donatedCents - costCents: positive means surplus. */
+  /** Income booked for the current month, in cents. */
+  incomeCents: Type.Number(),
+  /** incomeCents - costCents for the current month. */
   balanceCents: Type.Number(),
-  /** Running balance from the first donation month through the current month. */
-  cumulativeBalanceCents: Type.Number(),
+  /** Income booked through the current month: what came in until now. */
+  totalIncomeCents: Type.Number(),
+  /** Cost accumulated since the first income month through the current month. */
+  totalCostCents: Type.Number(),
+  /** totalIncomeCents - totalCostCents: >= 0 means the pot is break even. */
+  totalBalanceCents: Type.Number(),
 }, { additionalProperties: false })
 export type Coverage = Static<typeof CoverageSchema>
 
@@ -204,7 +179,7 @@ export const SummarySchema = Type.Object({
     pointCount: Type.Integer({ minimum: 0 }),
   }, { additionalProperties: false }),
   points: Type.Array(SummaryPointSchema),
-  donations: Type.Array(DonationSchema),
+  income: Type.Array(IncomeEntrySchema),
   categoryIcons: Type.Record(Type.String(), Type.String()),
   coverage: CoverageSchema,
   timeline: Type.Array(TimelineEntrySchema),

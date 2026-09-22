@@ -29,7 +29,6 @@ async function fixture(isAdmin = true) {
     avatarTag: 'avatar-tag' as string | null,
   }
   let sessionFailure = false
-  let usersFailure = false
   let authenticatedDeviceId = ''
   let loggedOutToken = ''
   const jellyfin = {
@@ -45,15 +44,6 @@ async function fixture(isAdmin = true) {
         throw error
       }
       return user
-    },
-    async users(token: string) {
-      assert.equal(token, 'session-token')
-      if (usersFailure) {
-        const error = new Error('offline')
-        error.name = 'JellyfinError'
-        throw error
-      }
-      return [user]
     },
     async logout(token: string) {
       loggedOutToken = token
@@ -78,7 +68,6 @@ async function fixture(isAdmin = true) {
     authenticatedDeviceId: () => authenticatedDeviceId,
     loggedOutToken: () => loggedOutToken,
     failSession: () => sessionFailure = true,
-    failUsers: () => usersFailure = true,
   }
 }
 
@@ -185,7 +174,11 @@ Deno.test('Hono authorization keeps outages distinct from invalid sessions', asy
   const viewer = await fixture(false)
   try {
     const cookie = await login(viewer.app)
-    const forbidden = await viewer.app.request('/api/users', { headers: { cookie } })
+    const forbidden = await viewer.app.request('/api/income', {
+      method: 'POST',
+      headers: { ...JSON_HEADERS, cookie },
+      body: JSON.stringify({ month: '2026-06', amountCents: 2500 }),
+    })
     assert.equal(forbidden.status, 403)
     assert.deepEqual(await forbidden.json(), { error: 'admin required' })
   } finally {
@@ -193,18 +186,59 @@ Deno.test('Hono authorization keeps outages distinct from invalid sessions', asy
   }
 })
 
-Deno.test('admin user sync falls back to the persisted archive during outages', async () => {
+Deno.test('income bookings are managed by admins and summarized in the pot', async () => {
   const test = await fixture()
   try {
-    await test.store.touchKnownUser({ id: 'archived-1', name: 'Known user' })
     const cookie = await login(test.app)
-    test.failUsers()
+    const month = new Date().toISOString().slice(0, 7)
 
-    const response = await test.app.request('/api/users', { headers: { cookie } })
-    assert.equal(response.status, 200)
-    assert.deepEqual((await response.json()).map((user: { id: string }) => user.id), [
-      'archived-1',
-    ])
+    const invalid = await test.app.request('/api/income', {
+      method: 'POST',
+      headers: { ...JSON_HEADERS, cookie },
+      body: JSON.stringify({ month: '2026-6', amountCents: 2500 }),
+    })
+    assert.equal(invalid.status, 400)
+
+    const created = await test.app.request('/api/income', {
+      method: 'POST',
+      headers: { ...JSON_HEADERS, cookie },
+      body: JSON.stringify({ month, amountCents: 2500, note: 'Kasse' }),
+    })
+    assert.equal(created.status, 201)
+    assert.deepEqual(await created.json(), { id: 1, month, amountCents: 2500, note: 'Kasse' })
+
+    const updated = await test.app.request('/api/income/1', {
+      method: 'PUT',
+      headers: { ...JSON_HEADERS, cookie },
+      body: JSON.stringify({ month, amountCents: 3000 }),
+    })
+    assert.equal(updated.status, 200)
+    assert.deepEqual(await updated.json(), { id: 1, month, amountCents: 3000, note: null })
+
+    const missing = await test.app.request('/api/income/9', {
+      method: 'PUT',
+      headers: { ...JSON_HEADERS, cookie },
+      body: JSON.stringify({ month, amountCents: 3000 }),
+    })
+    assert.equal(missing.status, 404)
+
+    const summary = await test.app.request('/api/summary', { headers: { cookie } })
+    assert.equal(summary.status, 200)
+    const body = await summary.json()
+    assert.deepEqual(
+      body.income.map((entry: { id: number }) => entry.id),
+      [1],
+    )
+    assert.equal(body.coverage.incomeCents, 3000)
+    assert.equal(body.coverage.totalIncomeCents, 3000)
+    assert.equal(body.coverage.totalCostCents, 0)
+    assert.equal(body.coverage.totalBalanceCents, 3000)
+
+    const removed = await test.app.request('/api/income/1', {
+      method: 'DELETE',
+      headers: { cookie },
+    })
+    assert.equal(removed.status, 204)
   } finally {
     await Deno.remove(test.directory, { recursive: true })
   }

@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-- costthing is a cost-transparency dashboard for a shared Jellyfin server: a Deno + Elysia API
+- costthing is a cost-transparency dashboard for a shared Jellyfin server: a Deno + Hono API
   (`src/`), a Svelte 5 + Vite SPA (`frontend/`), and the wire contract both sides import from
   `shared/types.ts`. State is one JSON file on disk — there is no database.
 - `main` is the only long-lived branch; use `main` or `origin/main` for diffs.
@@ -77,25 +77,25 @@ const first = new Date(year, monthIndex, 1)
 
 ## Repo Patterns
 
-- Routes live in `src/main.ts` as Elysia handlers with `t.Object` body schemas. Authorization is two
-  nested `.guard({ beforeHandle })` layers: the outer one requires a valid Jellyfin session, the
-  inner one requires `isAdmin`. Put new endpoints inside the matching guard instead of adding ad-hoc
-  checks.
+- Routes live in `src/app.ts` as Hono handlers with TypeBox body schemas. The viewer router requires
+  a valid Jellyfin session and the nested admin router requires `isAdmin`. Put new endpoints inside
+  the matching router instead of adding ad-hoc checks.
 - Admin status comes only from Jellyfin (`Policy.IsAdministrator`); the app stores no credentials
   and no roles. `src/auth.ts` caches token → user for 60s, coalesces validation requests, and keeps
   transient Jellyfin failures distinct from an invalid session so outages do not force a relogin.
 - `Store` (`src/store.ts`) is the only writer of the data file. It serializes and validates complete
   mutations, rolls memory back on write failures, and persists through a unique temporary file.
-  Persistence reconciles donation → user links, prunes icons of dead categories, copies the previous
-  file to `costs.json.bak`, then atomically renames the temporary file. Never touch the file
-  directly.
-- The on-disk format is exactly the export format (`CostFile`, `schemaVersion: 1`). Every read goes
+  Persistence prunes icons of dead categories, copies the previous file to `costs.json.bak`, then
+  atomically renames the temporary file. Never touch the file directly.
+- The on-disk format is exactly the export format (`CostFile`, `schemaVersion: 2`). Every read goes
   through `normalizeCostFile`, which validates and migrates legacy shapes. A new field needs the
   type in `shared/types.ts`, a branch in the normalizer, and a default for old files.
-- `knownUsers` is append-only: users that disappear from Jellyfin are marked `archived`, never
-  deleted, so historic donations stay attributable and returning donors reuse their id.
-- Cost and donation math lives only in `src/calc.ts` and is covered by `src/calc_test.ts`. The
-  frontend renders the `Summary` from `/api/summary` and never recomputes totals.
+- Income is booked manually by admins as month, amount and optional note. There is no donor registry
+  or recurring income. Legacy v1 donations migrate once into booked income through the migration
+  month.
+- Cost and income math lives in `src/calc.ts`; timeline and pot aggregation live in
+  `src/summary.ts`. Both have adjacent tests. The frontend renders the `Summary` from `/api/summary`
+  and never recomputes totals.
 - `COST_ICONS` keys in `frontend/src/lib/icons.ts` are persisted in the data file — add keys, never
   rename them.
 - All frontend requests go through the `api` object in `frontend/src/lib/api.ts`; failures throw

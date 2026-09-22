@@ -1,29 +1,24 @@
-import type { CostPoint, Coverage, Donation, TimelineEntry } from '../shared/types.ts'
-import { donationCentsForMonth, monthlyCents } from './calc.ts'
+import type { CostPoint, Coverage, IncomeEntry, TimelineEntry } from '../shared/types.ts'
+import { incomeCentsForMonth, monthlyCents } from './calc.ts'
 
 function monthOf(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`
 }
 
-function donatedInMonth(donations: Donation[], month: string): number {
-  return donations.reduce((sum, donation) => sum + donationCentsForMonth(donation, month), 0)
-}
-
-/** Cost and confirmed-donation history through twelve months after the current month. */
+/** Cost and booked-income history through twelve months after the current month. */
 export function buildTimeline(
   points: CostPoint[],
-  donations: Donation[],
+  income: IncomeEntry[],
   now: Date,
 ): TimelineEntry[] {
-  const confirmed = donations.filter((donation) => donation.status === 'confirmed')
-  if (points.length === 0 && confirmed.length === 0) return []
+  if (points.length === 0 && income.length === 0) return []
 
   // Always include the current month, even when every configured entry starts in the future.
   const currentMonth = monthOf(now)
   const earliest = [
     currentMonth,
     ...points.map((point) => point.startsOn.slice(0, 7)),
-    ...confirmed.map((donation) => donation.receivedOn.slice(0, 7)),
+    ...income.map((entry) => entry.month),
   ].sort()[0]!
   const [startYear, startMonth] = earliest.split('-').map(Number)
   const cursor = new Date(Date.UTC(startYear ?? 1970, (startMonth ?? 1) - 1, 1))
@@ -46,7 +41,7 @@ export function buildTimeline(
     entries.push({
       month,
       totalCents,
-      donatedCents: donatedInMonth(confirmed, month),
+      incomeCents: incomeCentsForMonth(income, month),
       categories,
     })
     cursor.setUTCMonth(cursor.getUTCMonth() + 1)
@@ -54,32 +49,39 @@ export function buildTimeline(
   return entries
 }
 
-/** Donations versus cost for the current month and since the first confirmed donation. */
+/**
+ * The pot: booked income versus accumulated cost through the current month.
+ * Cost-only history before the first income month is left out so it does not
+ * drown the balance in deficit — the totals answer "since people started paying".
+ */
 export function buildCoverage(
   timeline: TimelineEntry[],
-  donations: Donation[],
+  income: IncomeEntry[],
   now: Date,
 ): Coverage {
   const month = monthOf(now)
   const current = timeline.find((entry) => entry.month === month)
   const costCents = current?.totalCents ?? 0
-  const donatedCents = current?.donatedCents ?? 0
-  const confirmed = donations.filter((donation) => donation.status === 'confirmed')
+  const incomeCents = current?.incomeCents ?? 0
 
-  let cumulativeBalanceCents = 0
-  if (confirmed.length > 0) {
-    const firstMonth = confirmed.map((donation) => donation.receivedOn.slice(0, 7)).sort()[0]!
+  let totalIncomeCents = 0
+  let totalCostCents = 0
+  if (income.length > 0) {
+    const firstMonth = income.map((entry) => entry.month).sort()[0]!
     for (const entry of timeline) {
       if (entry.month < firstMonth || entry.month > month) continue
-      cumulativeBalanceCents += entry.donatedCents - entry.totalCents
+      totalIncomeCents += entry.incomeCents
+      totalCostCents += entry.totalCents
     }
   }
 
   return {
     month,
     costCents,
-    donatedCents,
-    balanceCents: donatedCents - costCents,
-    cumulativeBalanceCents,
+    incomeCents,
+    balanceCents: incomeCents - costCents,
+    totalIncomeCents,
+    totalCostCents,
+    totalBalanceCents: totalIncomeCents - totalCostCents,
   }
 }

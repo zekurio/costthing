@@ -6,44 +6,33 @@
   import type {
     Cadence,
     CostSaveInput,
-    Donation,
-    DonationCadence,
-    DonationInput,
+    IncomeEntry,
+    IncomeInput,
     IntervalUnit,
-    KnownUser,
     PriceChange,
     SummaryPoint,
   } from '../../../shared/types.ts'
 
   interface Props {
     /** null = new entry; otherwise the entry being edited (tab is locked to its kind) */
-    initial: SummaryPoint | Donation | null
+    initial: SummaryPoint | IncomeEntry | null
     /** which tab to show first when adding a new entry */
-    initialKind: 'cost' | 'donation'
-    /** non-admin submitting a donation for themselves: locks the form to the donation tab */
-    donorOnly?: boolean
-    /** prefill for the name field (e.g. the logged-in user's name) */
-    defaultName?: string
-    /** admin only: Jellyfin users (incl. archived) for linking donations */
-    knownUsers?: KnownUser[]
+    initialKind: 'cost' | 'income'
     categories: string[]
     /** category name → lucide icon name */
     categoryIcons: Record<string, string>
     onsaveCost: (input: CostSaveInput) => Promise<void>
-    onsaveDonation: (input: DonationInput) => Promise<void>
+    onsaveIncome: (input: IncomeInput) => Promise<void>
     onclose: () => void
   }
 
   let {
     initial,
     initialKind,
-    donorOnly = false,
-    defaultName = '',
-    knownUsers = [],
     categories,
     categoryIcons,
     onsaveCost,
-    onsaveDonation,
+    onsaveIncome,
     onclose,
   }: Props = $props()
 
@@ -53,21 +42,22 @@
   // svelte-ignore state_referenced_locally
   const initialCost = initial && 'costCents' in initial ? initial : null
   // svelte-ignore state_referenced_locally
-  const initialDonation = initial && 'amountCents' in initial ? initial : null
+  const initialIncome = initial && 'amountCents' in initial ? initial : null
 
   const today = new Date().toISOString().slice(0, 10)
+  const currentMonth = today.slice(0, 7)
 
   // svelte-ignore state_referenced_locally
-  let kind = $state<'cost' | 'donation'>(donorOnly ? 'donation' : initialKind)
+  let kind = $state<'cost' | 'income'>(initialKind)
 
   // shared
   // svelte-ignore state_referenced_locally
-  let name = $state(initial?.name ?? defaultName)
+  let name = $state(initialCost?.name ?? '')
   let amount = $state(
     initialCost
       ? (initialCost.costCents / 100).toFixed(2)
-      : initialDonation
-        ? (initialDonation.amountCents / 100).toFixed(2)
+      : initialIncome
+        ? (initialIncome.amountCents / 100).toFixed(2)
         : '',
   )
 
@@ -117,53 +107,14 @@
     priceChanges = priceChanges.filter((row) => row.id !== id)
   }
 
-  // donation-only
-  let donationCadence = $state<DonationCadence>(initialDonation?.cadence ?? 'one_time')
-  let receivedOn = $state(initialDonation?.receivedOn ?? today)
-  let donationEndsOn = $state(initialDonation?.endsOn ?? '')
-  // linked Jellyfin user ('' = none/external); self-submitted donations are
-  // linked server-side, so the picker only shows for admins
-  // svelte-ignore state_referenced_locally
-  let donationUserId = $state(initialDonation?.userId ?? '')
-  // existing links and picker changes are explicit; inferred links may follow name edits
-  let donationLinkTouched = $state(initialDonation?.userId !== null && initialDonation !== null)
-
-  const userOptions = $derived([
-    { value: '', label: 'kein Konto (extern)' },
-    ...knownUsers.map((u) => ({
-      value: u.id,
-      label: u.archived ? `${u.name} (archiviert)` : u.name,
-    })),
-  ])
-
-  // convenience: an empty name field takes over the linked user's name
-  $effect(() => {
-    const user = knownUsers.find((u) => u.id === donationUserId)
-    if (user && !name.trim()) name = user.name
-  })
-
-  // mirrors the server rule while keeping inferred selections in sync with name edits
-  $effect(() => {
-    if (donationLinkTouched) return
-    const needle = name.trim().toLowerCase()
-    const matches = needle
-      ? knownUsers.filter((u) => u.name.trim().toLowerCase() === needle)
-      : []
-    const active = matches.filter((u) => !u.archived)
-    const match = active.length === 1
-      ? active[0]
-      : active.length === 0 && matches.length === 1
-        ? matches[0]
-        : null
-    donationUserId = match?.id ?? ''
-  })
+  // income-only
+  let month = $state(initialIncome?.month ?? currentMonth)
+  let note = $state(initialIncome?.note ?? '')
 
   const editorTitle = $derived(
-    donorOnly
-      ? 'Spende melden'
-      : initial
-        ? (kind === 'cost' ? 'Kostenpunkt bearbeiten' : 'Spende bearbeiten')
-        : 'Eintrag hinzufügen',
+    initial
+      ? (kind === 'cost' ? 'Kostenpunkt bearbeiten' : 'Einnahme bearbeiten')
+      : 'Eintrag hinzufügen',
   )
 
   let error = $state('')
@@ -181,9 +132,9 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault()
     const amountCents = parseAmount(amount)
-    if (amountCents === null || (kind === 'donation' && amountCents === 0)) {
+    if (amountCents === null || (kind === 'income' && amountCents === 0)) {
       error =
-        kind === 'donation'
+        kind === 'income'
           ? 'Betrag muss eine positive Zahl sein, z. B. 5,00'
           : 'Betrag muss eine Zahl sein, z. B. 10,40'
       return
@@ -221,9 +172,6 @@
           seenMonths.add(changeMonth)
         }
       }
-    } else if (donationEndsOn && donationEndsOn < receivedOn) {
-      error = 'Ende liegt vor dem Beginn.'
-      return
     }
     busy = true
     error = ''
@@ -250,13 +198,10 @@
           intervalUnit: cadence === 'custom' ? intervalUnit : null,
         })
       } else {
-        await onsaveDonation({
-          name: name.trim(),
+        await onsaveIncome({
+          month,
           amountCents,
-          cadence: donationCadence,
-          receivedOn,
-          endsOn: donationCadence === 'one_time' ? null : donationEndsOn || null,
-          userId: donationUserId || null,
+          note: note.trim() || null,
         })
       }
     } catch (err) {
@@ -268,12 +213,7 @@
 
 <Dialog title={editorTitle} {onclose} size="form">
   <form onsubmit={submit}>
-    {#if donorOnly}
-      <span class="help">
-        Deine Spende erscheint als „ausstehend“ und zählt erst, sobald ein Admin sie bestätigt hat.
-      </span>
-    {:else}
-      <div
+    <div
         class="kind-toggle"
         role="group"
         aria-label="Eintragstyp"
@@ -290,25 +230,26 @@
         </button>
         <button
           type="button"
-          aria-pressed={kind === 'donation'}
-          class:active={kind === 'donation'}
+          aria-pressed={kind === 'income'}
+          class:active={kind === 'income'}
           disabled={initial !== null}
-          onclick={() => (kind = 'donation')}
+          onclick={() => (kind = 'income')}
         >
-          Spende
+          Einnahme
         </button>
       </div>
-    {/if}
 
-    <label>
-      {#if kind === 'cost'}Name{:else}Name / Quelle{/if}
+    {#if kind === 'cost'}
+      <label>
+        Name
       <input
         bind:value={name}
         required
         maxlength="200"
-        placeholder={kind === 'cost' ? 'z. B. Mullvad VPN' : 'z. B. Alex oder Ko-fi'}
+        placeholder="z. B. Mullvad VPN"
       />
-    </label>
+      </label>
+    {/if}
 
     {#if kind === 'cost'}
       <label>
@@ -462,55 +403,20 @@
         </div>
       {/if}
     {:else}
-      {#if !donorOnly && knownUsers.length > 0}
-        <label>
-          Jellyfin-Konto (optional)
-          <Select
-            bind:value={donationUserId}
-            options={userOptions}
-            onchange={() => (donationLinkTouched = true)}
-          />
-          <span class="help">
-            Stimmt der Name genau mit einem Konto oder einer bereits verknüpften Spende überein,
-            wird automatisch verknüpft. Gelöschte Konten bleiben als „archiviert“ wählbar, damit
-            alte Spenden zugeordnet bleiben.
-          </span>
-        </label>
-      {/if}
       <div class="row">
         <label>
           Betrag
           <input bind:value={amount} required inputmode="decimal" placeholder="5,00" />
         </label>
         <label>
-          Rhythmus
-          <Select
-            bind:value={donationCadence}
-            options={[
-              { value: 'one_time', label: 'einmalig' },
-              { value: 'monthly', label: 'monatlich' },
-              { value: 'yearly', label: 'jährlich' },
-            ]}
-          />
+          Monat
+          <input type="month" bind:value={month} required />
         </label>
       </div>
-      <div class="row">
-        <label>
-          {donationCadence === 'one_time' ? 'Eingegangen am' : 'Erstmals am'}
-          <input type="date" bind:value={receivedOn} required />
-        </label>
-        {#if donationCadence !== 'one_time'}
-          <label>
-            Ende (optional)
-            <input type="date" bind:value={donationEndsOn} />
-          </label>
-        {/if}
-      </div>
-      <span class="help">
-        {donationCadence === 'one_time'
-          ? 'Zählt für den Kalendermonat des Datums.'
-          : 'Wird ab dem ersten Datum automatisch in jedem passenden Monat eingeplant.'}
-      </span>
+      <label>
+        Notiz (optional)
+        <input bind:value={note} maxlength="500" placeholder="z. B. Überweisung" />
+      </label>
     {/if}
 
     {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -518,7 +424,7 @@
     <div class="actions">
       <button type="button" class="btn ghost" onclick={onclose}>abbrechen</button>
       <button type="submit" class="btn primary" disabled={busy}>
-        {busy ? 'speichere…' : donorOnly ? 'zur Bestätigung senden' : 'speichern'}
+        {busy ? 'speichere…' : 'speichern'}
       </button>
     </div>
   </form>
